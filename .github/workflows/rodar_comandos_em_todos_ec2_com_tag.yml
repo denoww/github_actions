@@ -72,56 +72,84 @@ jobs:
           echo "Targets: ${ids:-<none>}"
           echo "instance_ids=${ids}" >> "$GITHUB_OUTPUT"
 
+
       - name: Executar via SSM
-        if: steps.discover.outputs.instance_ids != ''
-        shell: bash
-        env:
-          AWS_REGION:   ${{ inputs.aws_region }}
-          INSTANCE_IDS: ${{ steps.discover.outputs.instance_ids }}
-          REMOTE_CMD:   ${{ inputs.remote_cmd }}
-          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
-          INTERVAL:     ${{ inputs.interval_secs }}
-        run: |
-          set -euo pipefail
-          for ID in $INSTANCE_IDS; do
-            echo "::group::Enviando comando para $ID"
-            # JSON seguro pro parâmetro --parameters
-            PARAMS=$(jq -Rn --arg cmd "$REMOTE_CMD" '{commands: [$cmd]}')
+              if: steps.discover.outputs.instance_ids != ''
+              shell: bash
+              env:
+                AWS_REGION:   ${{ inputs.aws_region }}
+                INSTANCE_IDS: ${{ steps.discover.outputs.instance_ids }}
+                REMOTE_CMD:   ${{ inputs.remote_cmd }}
+                MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+                INTERVAL:     ${{ inputs.interval_secs }}
+              run: |
+                set -euo pipefail
 
-            COMMAND_ID=$(aws ssm send-command \
-              --region "$AWS_REGION" \
-              --document-name "AWS-RunShellScript" \
-              --comment "GitHub Actions EC2 fanout" \
-              --parameters "$PARAMS" \
-              --instance-ids "$ID" \
-              --query 'Command.CommandId' --output text)
+                # Defaults defensivos (não confie que inputs.* sempre chega)
+                : "${MAX_ATTEMPTS:=60}"
+                : "${INTERVAL:=5}"
+                [[ "$MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || MAX_ATTEMPTS=60
+                [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=5
+                echo "MAX_ATTEMPTS=$MAX_ATTEMPTS INTERVAL=$INTERVAL"
 
-            echo "CommandId: $COMMAND_ID"
+                FAIL=0
 
-            attempt=0
-            while (( attempt < MAX_ATTEMPTS )); do
-              STATUS=$(aws ssm get-command-invocation \
-                --region "$AWS_REGION" \
-                --command-id "$COMMAND_ID" \
-                --instance-id "$ID" \
-                --query 'Status' --output text || echo "Pending")
-              echo "[$ID] Status: $STATUS"
-              case "$STATUS" in
-                Success|Cancelled|TimedOut|Failed) break ;;
-              esac
-              sleep "$INTERVAL"
-              ((attempt++))
-            done
+                for ID in $INSTANCE_IDS; do
+                  echo "::group::Enviando comando para $ID"
 
-            echo "--- Saída $ID ---"
-            aws ssm get-command-invocation \
-              --region "$AWS_REGION" \
-              --command-id "$COMMAND_ID" \
-              --instance-id "$ID" \
-              --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
-              --output text || true
-            echo "::endgroup::"
-          done
+                  # Monta JSON seguro pro --parameters
+                  PARAMS=$(jq -Rn --arg cmd "$REMOTE_CMD" '{commands: [$cmd]}')
+
+                  COMMAND_ID=$(aws ssm send-command \
+                    --region "$AWS_REGION" \
+                    --document-name "AWS-RunShellScript" \
+                    --comment "GitHub Actions EC2 fanout" \
+                    --parameters "$PARAMS" \
+                    --instance-ids "$ID" \
+                    --query 'Command.CommandId' --output text)
+
+                  echo "CommandId: $COMMAND_ID"
+
+                  attempt=0
+                  STATUS="Pending"
+                  while (( attempt < MAX_ATTEMPTS )); do
+                    STATUS=$(aws ssm get-command-invocation \
+                      --region "$AWS_REGION" \
+                      --command-id "$COMMAND_ID" \
+                      --instance-id "$ID" \
+                      --query 'Status' --output text \
+                      || echo "Pending")
+                    echo "[$ID] Status: $STATUS"
+                    case "$STATUS" in
+                      Success|Cancelled|TimedOut|Failed) break ;;
+                    esac
+                    sleep "$INTERVAL"
+                    ((attempt++))
+                  done
+
+                  # Captura saída e códigos finais
+                  aws ssm get-command-invocation \
+                    --region "$AWS_REGION" \
+                    --command-id "$COMMAND_ID" \
+                    --instance-id "$ID" \
+                    --output json > ssm_out.json || true
+
+                  FINAL_STATUS=$(jq -r '.Status // "Unknown"' ssm_out.json 2>/dev/null || echo "Unknown")
+                  RESPONSE_CODE=$(jq -r '.ResponseCode // -1' ssm_out.json 2>/dev/null || echo -1)
+
+                  echo "FinalStatus=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+                  echo "--- STDOUT ---"; jq -r '.StandardOutputContent // ""' ssm_out.json
+                  echo "--- STDERR ---"; jq -r '.StandardErrorContent // ""' ssm_out.json
+
+                  if [[ "$FINAL_STATUS" != "Success" ]] || [[ "$RESPONSE_CODE" != "0" ]]; then
+                    echo "::error title=SSM falhou para $ID::Status=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+                    FAIL=1
+                  fi
+
+                  echo "::endgroup::"
+                done
+
+                exit $FAIL
 
       - name: Sem alvos compatíveis
         if: steps.discover.outputs.instance_ids == ''
