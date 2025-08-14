@@ -120,16 +120,20 @@ jobs:
           set -euo pipefail
           for ID in $INSTANCE_IDS; do
             echo "::group::Enviando comando para $ID"
+
+            # Constrói JSON seguro para o parâmetro --parameters
+            PARAMS=$(jq -Rn --arg cmd "$REMOTE_CMD" '{commands: [$cmd]}')
+
             COMMAND_ID=$(aws ssm send-command \
               --region "$AWS_REGION" \
               --document-name "AWS-RunShellScript" \
               --comment "GitHub Actions EC2 fanout" \
-              --parameters commands=["$REMOTE_CMD"] \
+              --parameters "$PARAMS" \
               --instance-ids "$ID" \
               --query 'Command.CommandId' --output text)
 
             echo "CommandId: $COMMAND_ID"
-            # esperar
+
             attempt=0
             while (( attempt < MAX_ATTEMPTS )); do
               STATUS=$(aws ssm get-command-invocation \
@@ -154,6 +158,7 @@ jobs:
               --output text || true
             echo "::endgroup::"
           done
+
 
       - name: Sem alvos compatíveis
         if: steps.discover.outputs.instance_ids == ''
