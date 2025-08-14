@@ -1,0 +1,70 @@
+name: Reusable • ECR build & push
+
+on:
+  workflow_call:
+    inputs:
+      aws_region:
+        type: string
+        default: us-east-1
+      ecr_repository:
+        type: string
+        required: true
+      dockerfile:
+        type: string
+        default: Dockerfile
+      build_context:
+        type: string
+        default: .
+      image_tag:
+        type: string
+        default: ${{ github.sha }}
+      push_latest:
+        type: boolean
+        default: true
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image_sha: ${{ steps.build.outputs.image_sha }}
+      image_latest: ${{ steps.build.outputs.image_latest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR (SHA [+ latest])
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE_SHA="$REGISTRY/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}"
+          docker build -f "${{ inputs.dockerfile }}" -t "$IMAGE_SHA" "${{ inputs.build_context }}"
+          docker push "$IMAGE_SHA"
+          echo "image_sha=$IMAGE_SHA" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ inputs.push_latest }}" = "true" ]; then
+            IMAGE_LATEST="$REGISTRY/${{ inputs.ecr_repository }}:latest"
+            docker tag "$IMAGE_SHA" "$IMAGE_LATEST"
+            docker push "$IMAGE_LATEST"
+            echo "image_latest=$IMAGE_LATEST" >> "$GITHUB_OUTPUT"
+          fi
