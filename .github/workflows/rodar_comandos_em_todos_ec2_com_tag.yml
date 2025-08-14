@@ -120,7 +120,7 @@ jobs:
                 Success|Cancelled|TimedOut|Failed) break ;;
               esac
               sleep "$INTERVAL"
-              ((attempt++))
+              attempt=$((attempt+1))
             done
 
             # Pega DETALHES por plugin (mais confiável que o agregado)
