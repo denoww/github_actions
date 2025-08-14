@@ -1,4 +1,4 @@
-name: Reusable • EC2 fanout via SSM
+name: comando SSM no EC2
 
 on:
   workflow_call:
@@ -33,7 +33,7 @@ on:
         required: true
 
 jobs:
-  fanout:
+  comando_ssm_no_ec2:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -101,7 +101,7 @@ jobs:
             COMMAND_ID=$(aws ssm send-command \
               --region "$AWS_REGION" \
               --document-name "AWS-RunShellScript" \
-              --comment "GitHub Actions EC2 fanout" \
+              --comment "GitHub Actions EC2 comando_ssm_no_ec2" \
               --parameters "$PARAMS" \
               --instance-ids "$ID" \
               --query 'Command.CommandId' --output text)
