@@ -6,7 +6,7 @@ on:
       aws_region:
         type: string
         default: us-east-1
-      project_token:
+      projeto_tag:
         description: "Token a procurar dentro da tag 'projetos' (CSV-aware)"
         type: string
         required: true
@@ -66,7 +66,7 @@ jobs:
         env:
           AWS_REGION: ${{ inputs.aws_region }}
           TAG_KEY: ${{ inputs.tag_key }}
-          PROJECT_TOKEN: ${{ inputs.project_token }}
+          PROJECT_TOKEN: ${{ inputs.projeto_tag }}
         run: |
           set -euo pipefail
           aws ec2 describe-instances \
@@ -157,4 +157,4 @@ jobs:
 
       - name: Sem alvos compatíveis
         if: steps.discover.outputs.instance_ids == ''
-        run: echo "Nenhuma instância com tag '${{ inputs.tag_key }}' contendo '${{ inputs.project_token }}'."
+        run: echo "Nenhuma instância com tag '${{ inputs.tag_key }}' contendo '${{ inputs.projeto_tag }}'."
