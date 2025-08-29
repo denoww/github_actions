@@ -91,32 +91,25 @@ jobs:
           [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=5
           echo "MAX_ATTEMPTS=$MAX_ATTEMPTS INTERVAL=$INTERVAL"
 
-          # 1) Codifica o comando remoto para evitar problemas de quoting
-          REMOTE_CMD_B64="$(printf '%s' "$REMOTE_CMD" | base64 -w0)"  # GNU coreutils no ubuntu-latest
+          # Codifica o comando remoto em base64 (sem quebras de linha)
+          REMOTE_CMD_B64="$(printf '%s' "$REMOTE_CMD" | base64 | tr -d '\n')"
 
           FAIL=0
           for ID in $INSTANCE_IDS; do
             echo "::group::Enviando comando para $ID"
 
-            # 2) Wrapper que:
-            #   - habilita set -euxo pipefail
-            #   - grava tudo em /tmp/ga_cmd.out
-            #   - decodifica o script do usuário (base64) para /tmp/ga_cmd.sh
-            #   - executa e imprime as últimas 1000 linhas do log
-            #   - retorna o mesmo exit code
-            read -r -d '' WRAPPED_CMD <<'EOS'
+            # Wrapper que decodifica, executa, loga e preserva exit code
+            read -r -d '' WRAPPED_CMD <<'EOS' || true
           set -euxo pipefail
           LOG=/tmp/ga_cmd.out
-
-          # escreve o script do usuário a partir de base64
           : "${REMOTE_CMD_B64:?missing}"
-          printf '%s' "$REMOTE_CMD_B64" | base64 -d >/tmp/ga_cmd.sh
 
-          # garante permissões e ambiente
+          # materializa o script do usuário
+          printf '%s' "$REMOTE_CMD_B64" | base64 -d >/tmp/ga_cmd.sh
           chmod +x /tmp/ga_cmd.sh
           export HOME="${HOME:-/root}"
 
-          # executa capturando stdout+stderr no arquivo
+          # executa capturando stdout+stderr
           bash -lc "bash /tmp/ga_cmd.sh" >"$LOG" 2>&1 || RC=$? || true
           RC="${RC:-0}"
 
@@ -127,14 +120,13 @@ jobs:
           exit "$RC"
           EOS
 
-            # 3) Injeta o REMOTE_CMD_B64 no wrapper sem sed, usando variável de ambiente
-            #    Vamos montar um comando único que exporta REMOTE_CMD_B64 e roda o wrapper.
+            # injeta REMOTE_CMD_B64 via export + executa o wrapper
             FULL_CMD="export REMOTE_CMD_B64='$REMOTE_CMD_B64'; $WRAPPED_CMD"
 
-            # 4) Parâmetros do SSM (JSON seguro)
-            PARAMS="$(jq -Rn --arg cmd "$FULL_CMD" '{commands: [$cmd]}')"
+            # monta JSON de parâmetros sem sed
+            PARAMS="$(jq -n --arg cmd "$FULL_CMD" '{commands: [$cmd]}')"
 
-            # 5) Envia o comando
+            # envia
             COMMAND_ID=$(aws ssm send-command \
               --region "$AWS_REGION" \
               --document-name "AWS-RunShellScript" \
@@ -145,7 +137,7 @@ jobs:
 
             echo "CommandId: $COMMAND_ID"
 
-            # 6) Espera conclusão
+            # espera finalizar
             attempt=0
             while (( attempt < MAX_ATTEMPTS )); do
               STATUS=$(aws ssm get-command-invocation \
@@ -161,7 +153,7 @@ jobs:
               attempt=$((attempt+1))
             done
 
-            # 7) Busca conteúdo final (até ~24KB por campo – suficiente com nosso tail)
+            # coleta saídas finais (conteúdo já veio no stdout do plugin)
             GCI=$(aws ssm get-command-invocation \
               --region "$AWS_REGION" \
               --command-id "$COMMAND_ID" \
@@ -173,7 +165,6 @@ jobs:
             STDOUT=$(jq -r '.StandardOutputContent // ""' <<<"$GCI")
             STDERR=$(jq -r '.StandardErrorContent  // ""' <<<"$GCI")
 
-            # normaliza response code vazio quando sucesso
             if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
               if [[ "$FINAL_STATUS" == "Success" ]]; then RESPONSE_CODE=0; else RESPONSE_CODE=-1; fi
             fi
