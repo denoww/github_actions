@@ -1,3 +1,4 @@
+# rodar_comandos_em_todos_ec2_com_tag.yml
 name: comando SSM no EC2
 
 on:
