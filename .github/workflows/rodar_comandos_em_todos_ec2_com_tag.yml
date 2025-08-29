@@ -91,17 +91,16 @@ jobs:
           [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=5
           echo "MAX_ATTEMPTS=$MAX_ATTEMPTS INTERVAL=$INTERVAL"
 
-          # 1) Codifica o comando remoto (sem quebras)
+          # 1) Base64 do seu comando remoto (sem quebras)
           REMOTE_CMD_B64="$(printf '%s' "$REMOTE_CMD" | base64 | tr -d '\n')"
 
-          # 2) Wrapper que roda *em bash* na instância
+          # 2) Wrapper que roda em BASH na instância, imprime logs e preserva exit code
           WRAP_BASH="$(cat <<'WRAP'
           set -euxo pipefail
           LOG=/tmp/ga_cmd.out
-          : "${REMOTE_CMD_B64:?missing}"
 
           # materializa o script do usuário
-          printf '%s' "$REMOTE_CMD_B64" | base64 -d >/tmp/ga_cmd.sh
+          base64 -d /tmp/ga_cmd.sh.b64 > /tmp/ga_cmd.sh
           chmod +x /tmp/ga_cmd.sh
           export HOME="${HOME:-/root}"
 
@@ -117,31 +116,34 @@ jobs:
           WRAP
           )"
 
-          # 3) Codifica o wrapper (sem quebras)
+          # 3) Base64 do wrapper (sem quebras)
           WRAP_B64="$(printf '%s' "$WRAP_BASH" | base64 | tr -d '\n')"
 
           FAIL=0
           for ID in $INSTANCE_IDS; do
             echo "::group::Enviando comando para $ID"
 
-            # 4) Comando final: exporta vars e força bash na instância
-            FULL_CMD='export REMOTE_CMD_B64='"'$REMOTE_CMD_B64'"' WRAP_B64='"'$WRAP_B64"'; /bin/bash -lc '"'"'printf %s "$WRAP_B64" | base64 -d > /tmp/ga_wrap.sh; bash /tmp/ga_wrap.sh'"'"''
+            # 4) Monta a lista de comandos do SSM usando HEREDOC, sem quotes malucas
+            CMDS_JSON="$(jq -n --arg wrap "$WRAP_B64" --arg remote "$REMOTE_CMD_B64" '{
+              commands: [
+                "cat >/tmp/ga_wrap.sh.b64 << \"EOF_WRAP\"\n\($wrap)\nEOF_WRAP",
+                "cat >/tmp/ga_cmd.sh.b64 << \"EOF_CMD\"\n\($remote)\nEOF_CMD",
+                "/bin/bash -lc \"base64 -d /tmp/ga_wrap.sh.b64 > /tmp/ga_wrap.sh; chmod +x /tmp/ga_wrap.sh; bash /tmp/ga_wrap.sh\""
+              ]
+            }')"
 
-            # 5) Parâmetros SSM (JSON seguro)
-            PARAMS="$(jq -n --arg cmd "$FULL_CMD" '{commands: [$cmd]}')"
-
-            # 6) Envia
+            # 5) Envia
             COMMAND_ID=$(aws ssm send-command \
               --region "$AWS_REGION" \
               --document-name "AWS-RunShellScript" \
               --comment "GitHub Actions EC2 comando_ssm_no_ec2" \
-              --parameters "$PARAMS" \
+              --parameters "$CMDS_JSON" \
               --instance-ids "$ID" \
               --query 'Command.CommandId' --output text)
 
             echo "CommandId: $COMMAND_ID"
 
-            # 7) Espera finalizar
+            # 6) Espera finalizar
             attempt=0
             while (( attempt < MAX_ATTEMPTS )); do
               STATUS=$(aws ssm get-command-invocation \
@@ -157,7 +159,7 @@ jobs:
               attempt=$((attempt+1))
             done
 
-            # 8) Captura saídas finais (nosso wrapper já imprimiu o log)
+            # 7) Captura saídas finais
             GCI=$(aws ssm get-command-invocation \
               --region "$AWS_REGION" \
               --command-id "$COMMAND_ID" \
