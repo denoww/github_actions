@@ -154,7 +154,17 @@ jobs:
 
             echo "FinalStatus=$FINAL_STATUS PluginStatus=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
             echo "--- STDOUT ---"; printf "%s\n" "$STDOUT"
-            echo "--- STDERR ---"; printf "%s\n" "$STDERR
+            echo "--- STDERR ---"; printf "%s\n" "$STDERR"
+
+            if [[ "$FINAL_STATUS" == "Failed" || "$FINAL_STATUS" == "TimedOut" || "$FINAL_STATUS" == "Cancelled" || "$RESPONSE_CODE" != "0" ]]; then
+              echo "::error title=SSM falhou para $ID::Status=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+              FAIL=1
+            fi
+
+            echo "::endgroup::"
+          done
+
+          exit $FAIL
 
 
           # set -euo pipefail
