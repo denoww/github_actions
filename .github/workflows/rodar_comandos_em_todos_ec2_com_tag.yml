@@ -91,20 +91,16 @@ jobs:
           [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=5
           echo "MAX_ATTEMPTS=$MAX_ATTEMPTS INTERVAL=$INTERVAL"
 
-          # Codifica o comando remoto em base64 (sem quebras de linha)
+          # Codifica o comando remoto em base64 (sem quebras)
           REMOTE_CMD_B64="$(printf '%s' "$REMOTE_CMD" | base64 | tr -d '\n')"
 
-          FAIL=0
-          for ID in $INSTANCE_IDS; do
-            echo "::group::Enviando comando para $ID"
-
-            # Wrapper que decodifica, executa, loga e preserva exit code
-            read -r -d '' WRAPPED_CMD <<'EOS' || true
+          # Script WRAPPER que roda em BASH na instância
+          read -r -d '' WRAP_BASH <<'WRAP'
           set -euxo pipefail
           LOG=/tmp/ga_cmd.out
           : "${REMOTE_CMD_B64:?missing}"
 
-          # materializa o script do usuário
+          # materializa o script do usuário a partir de base64
           printf '%s' "$REMOTE_CMD_B64" | base64 -d >/tmp/ga_cmd.sh
           chmod +x /tmp/ga_cmd.sh
           export HOME="${HOME:-/root}"
@@ -118,15 +114,22 @@ jobs:
           echo "--- END REMOTE LOG ---"
           echo "EXIT_CODE=$RC"
           exit "$RC"
-          EOS
+          WRAP
 
-            # injeta REMOTE_CMD_B64 via export + executa o wrapper
-            FULL_CMD="export REMOTE_CMD_B64='$REMOTE_CMD_B64'; $WRAPPED_CMD"
+          # Codifica o wrapper para enviar por variável (sem quebras)
+          WRAP_B64="$(printf '%s' "$WRAP_BASH" | base64 | tr -d '\n')"
 
-            # monta JSON de parâmetros sem sed
+          FAIL=0
+          for ID in $INSTANCE_IDS; do
+            echo "::group::Enviando comando para $ID"
+
+            # Monta comando final:
+            #  1) exporta REMOTE_CMD_B64 e WRAP_B64 no sh
+            #  2) chama /bin/bash -lc para decodificar e rodar o wrapper em BASH
+            FULL_CMD="export REMOTE_CMD_B64='$REMOTE_CMD_B64' WRAP_B64='$WRAP_B64'; /bin/bash -lc 'printf %s \"\$WRAP_B64\" | base64 -d > /tmp/ga_wrap.sh; bash /tmp/ga_wrap.sh'"
+
             PARAMS="$(jq -n --arg cmd "$FULL_CMD" '{commands: [$cmd]}')"
 
-            # envia
             COMMAND_ID=$(aws ssm send-command \
               --region "$AWS_REGION" \
               --document-name "AWS-RunShellScript" \
@@ -137,7 +140,6 @@ jobs:
 
             echo "CommandId: $COMMAND_ID"
 
-            # espera finalizar
             attempt=0
             while (( attempt < MAX_ATTEMPTS )); do
               STATUS=$(aws ssm get-command-invocation \
@@ -153,7 +155,6 @@ jobs:
               attempt=$((attempt+1))
             done
 
-            # coleta saídas finais (conteúdo já veio no stdout do plugin)
             GCI=$(aws ssm get-command-invocation \
               --region "$AWS_REGION" \
               --command-id "$COMMAND_ID" \
