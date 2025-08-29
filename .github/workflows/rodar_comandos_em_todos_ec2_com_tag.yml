@@ -91,48 +91,29 @@ jobs:
           [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=5
           echo "MAX_ATTEMPTS=$MAX_ATTEMPTS INTERVAL=$INTERVAL"
 
-          # 1) Base64 do seu comando remoto (sem quebras)
+          # 1) Base64 do seu comando remoto (linha única)
           REMOTE_CMD_B64="$(printf '%s' "$REMOTE_CMD" | base64 | tr -d '\n')"
-
-          # 2) Wrapper que roda em BASH na instância, imprime logs e preserva exit code
-          WRAP_BASH="$(cat <<'WRAP'
-          set -euxo pipefail
-          LOG=/tmp/ga_cmd.out
-
-          # materializa o script do usuário
-          base64 -d /tmp/ga_cmd.sh.b64 > /tmp/ga_cmd.sh
-          chmod +x /tmp/ga_cmd.sh
-          export HOME="${HOME:-/root}"
-
-          # executa capturando stdout+stderr
-          bash -lc "bash /tmp/ga_cmd.sh" >"$LOG" 2>&1 || RC=$? || true
-          RC="${RC:-0}"
-
-          echo "--- BEGIN REMOTE LOG ---"
-          tail -n 2000 "$LOG" || true
-          echo "--- END REMOTE LOG ---"
-          echo "EXIT_CODE=$RC"
-          exit "$RC"
-          WRAP
-          )"
-
-          # 3) Base64 do wrapper (sem quebras)
-          WRAP_B64="$(printf '%s' "$WRAP_BASH" | base64 | tr -d '\n')"
 
           FAIL=0
           for ID in $INSTANCE_IDS; do
             echo "::group::Enviando comando para $ID"
 
-            # 4) Monta a lista de comandos do SSM usando HEREDOC, sem quotes malucas
-            CMDS_JSON="$(jq -n --arg wrap "$WRAP_B64" --arg remote "$REMOTE_CMD_B64" '{
+            # 2) Constrói o JSON dos "commands" SEM quebras de linha
+            CMDS_JSON="$(jq -n --arg b64 "$REMOTE_CMD_B64" '{
               commands: [
-                "cat >/tmp/ga_wrap.sh.b64 << \"EOF_WRAP\"\n\($wrap)\nEOF_WRAP",
-                "cat >/tmp/ga_cmd.sh.b64 << \"EOF_CMD\"\n\($remote)\nEOF_CMD",
-                "/bin/bash -lc \"base64 -d /tmp/ga_wrap.sh.b64 > /tmp/ga_wrap.sh; chmod +x /tmp/ga_wrap.sh; bash /tmp/ga_wrap.sh\""
+                ("export REMOTE_CMD_B64='\($b64)'"),
+                "/bin/bash -lc '\''set -euxo pipefail; LOG=/tmp/ga_cmd.out; \
+          printf %s \"$REMOTE_CMD_B64\" | base64 -d > /tmp/ga_cmd.sh; \
+          chmod +x /tmp/ga_cmd.sh; \
+          bash -lc \"bash /tmp/ga_cmd.sh\" > \"$LOG\" 2>&1 || RC=$? || true; \
+          RC=${RC:-0}; \
+          echo \"--- BEGIN REMOTE LOG ---\"; tail -n 2000 \"$LOG\" || true; echo \"--- END REMOTE LOG ---\"; \
+          echo EXIT_CODE=$RC; \
+          exit $RC'\''"
               ]
             }')"
 
-            # 5) Envia
+            # 3) Envia
             COMMAND_ID=$(aws ssm send-command \
               --region "$AWS_REGION" \
               --document-name "AWS-RunShellScript" \
@@ -143,7 +124,7 @@ jobs:
 
             echo "CommandId: $COMMAND_ID"
 
-            # 6) Espera finalizar
+            # 4) Espera finalizar
             attempt=0
             while (( attempt < MAX_ATTEMPTS )); do
               STATUS=$(aws ssm get-command-invocation \
@@ -159,7 +140,7 @@ jobs:
               attempt=$((attempt+1))
             done
 
-            # 7) Captura saídas finais
+            # 5) Coleta saídas finais (o log principal já veio impresso pelo wrapper)
             GCI=$(aws ssm get-command-invocation \
               --region "$AWS_REGION" \
               --command-id "$COMMAND_ID" \
@@ -188,6 +169,122 @@ jobs:
           done
 
           exit $FAIL
+
+
+          ####################################################
+          ####################################################
+          ####################################################
+
+          # set -euo pipefail
+
+          # : "${MAX_ATTEMPTS:=60}"
+          # : "${INTERVAL:=5}"
+          # [[ "$MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || MAX_ATTEMPTS=60
+          # [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=5
+          # echo "MAX_ATTEMPTS=$MAX_ATTEMPTS INTERVAL=$INTERVAL"
+
+          # # 1) Base64 do seu comando remoto (sem quebras)
+          # REMOTE_CMD_B64="$(printf '%s' "$REMOTE_CMD" | base64 | tr -d '\n')"
+
+          # # 2) Wrapper que roda em BASH na instância, imprime logs e preserva exit code
+          # WRAP_BASH="$(cat <<'WRAP'
+          # set -euxo pipefail
+          # LOG=/tmp/ga_cmd.out
+
+          # # materializa o script do usuário
+          # base64 -d /tmp/ga_cmd.sh.b64 > /tmp/ga_cmd.sh
+          # chmod +x /tmp/ga_cmd.sh
+          # export HOME="${HOME:-/root}"
+
+          # # executa capturando stdout+stderr
+          # bash -lc "bash /tmp/ga_cmd.sh" >"$LOG" 2>&1 || RC=$? || true
+          # RC="${RC:-0}"
+
+          # echo "--- BEGIN REMOTE LOG ---"
+          # tail -n 2000 "$LOG" || true
+          # echo "--- END REMOTE LOG ---"
+          # echo "EXIT_CODE=$RC"
+          # exit "$RC"
+          # WRAP
+          # )"
+
+          # # 3) Base64 do wrapper (sem quebras)
+          # WRAP_B64="$(printf '%s' "$WRAP_BASH" | base64 | tr -d '\n')"
+
+          # FAIL=0
+          # for ID in $INSTANCE_IDS; do
+          #   echo "::group::Enviando comando para $ID"
+
+          #   # 4) Monta a lista de comandos do SSM usando HEREDOC, sem quotes malucas
+          #   CMDS_JSON="$(jq -n --arg wrap "$WRAP_B64" --arg remote "$REMOTE_CMD_B64" '{
+          #     commands: [
+          #       "cat >/tmp/ga_wrap.sh.b64 << \"EOF_WRAP\"\n\($wrap)\nEOF_WRAP",
+          #       "cat >/tmp/ga_cmd.sh.b64 << \"EOF_CMD\"\n\($remote)\nEOF_CMD",
+          #       "/bin/bash -lc \"base64 -d /tmp/ga_wrap.sh.b64 > /tmp/ga_wrap.sh; chmod +x /tmp/ga_wrap.sh; bash /tmp/ga_wrap.sh\""
+          #     ]
+          #   }')"
+
+          #   # 5) Envia
+          #   COMMAND_ID=$(aws ssm send-command \
+          #     --region "$AWS_REGION" \
+          #     --document-name "AWS-RunShellScript" \
+          #     --comment "GitHub Actions EC2 comando_ssm_no_ec2" \
+          #     --parameters "$CMDS_JSON" \
+          #     --instance-ids "$ID" \
+          #     --query 'Command.CommandId' --output text)
+
+          #   echo "CommandId: $COMMAND_ID"
+
+          #   # 6) Espera finalizar
+          #   attempt=0
+          #   while (( attempt < MAX_ATTEMPTS )); do
+          #     STATUS=$(aws ssm get-command-invocation \
+          #       --region "$AWS_REGION" \
+          #       --command-id "$COMMAND_ID" \
+          #       --instance-id "$ID" \
+          #       --query 'Status' --output text 2>/dev/null || echo "Pending")
+          #     echo "[$ID] Status: $STATUS"
+          #     case "$STATUS" in
+          #       Success|Cancelled|TimedOut|Failed) break ;;
+          #     esac
+          #     sleep "$INTERVAL"
+          #     attempt=$((attempt+1))
+          #   done
+
+          #   # 7) Captura saídas finais
+          #   GCI=$(aws ssm get-command-invocation \
+          #     --region "$AWS_REGION" \
+          #     --command-id "$COMMAND_ID" \
+          #     --instance-id "$ID" \
+          #     --output json || true)
+
+          #   FINAL_STATUS=$(jq -r '.Status // "Unknown"' <<<"$GCI")
+          #   RESPONSE_CODE=$(jq -r '.ResponseCode // empty' <<<"$GCI")
+          #   STDOUT=$(jq -r '.StandardOutputContent // ""' <<<"$GCI")
+          #   STDERR=$(jq -r '.StandardErrorContent  // ""' <<<"$GCI")
+
+          #   if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
+          #     if [[ "$FINAL_STATUS" == "Success" ]]; then RESPONSE_CODE=0; else RESPONSE_CODE=-1; fi
+          #   fi
+
+          #   echo "FinalStatus=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+          #   echo "--- STDOUT ---"; printf "%s\n" "$STDOUT"
+          #   echo "--- STDERR ---"; printf "%s\n" "$STDERR"
+
+          #   if [[ "$FINAL_STATUS" == "Failed" || "$FINAL_STATUS" == "TimedOut" || "$FINAL_STATUS" == "Cancelled" || "$RESPONSE_CODE" != "0" ]]; then
+          #     echo "::error title=SSM falhou para $ID::Status=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+          #     FAIL=1
+          #   fi
+
+          #   echo "::endgroup::"
+          # done
+
+          # exit $FAIL
+          ################################################################
+          ################################################################
+          ################################################################
+          ################################################################
+          ################################################################
 
 
           # set -euo pipefail
