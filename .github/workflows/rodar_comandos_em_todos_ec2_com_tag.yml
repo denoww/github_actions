@@ -83,123 +83,210 @@ jobs:
           MAX_ATTEMPTS: ${{ inputs.max_attempts }}
           INTERVAL:     ${{ inputs.interval_secs }}
         run: |
-          set -euo pipefail
+          # JSON seguro com um wrapper que SEMPRE imprime logs e preserva exit code
+          WRAPPED_CMD=$(cat <<'EOS'
+          set -euxo pipefail
+          LOG=/tmp/ga_cmd.out
+          # script inline para capturar tudo
+          cat >/tmp/ga_cmd.sh <<'EOI'
+          set -euxo pipefail
+          export HOME="${HOME:-/root}"
 
-          : "${MAX_ATTEMPTS:=60}"
-          : "${INTERVAL:=5}"
-          [[ "$MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || MAX_ATTEMPTS=60
-          [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=5
-          echo "MAX_ATTEMPTS=$MAX_ATTEMPTS INTERVAL=$INTERVAL"
+          # ===== AQUI ENTRA O SEU COMANDO ORIGINAL =====
+          __REMOTE_CMD_PLACEHOLDER__
+          # ===== FIM DO COMANDO ORIGINAL =====
+          EOI
 
-          FAIL=0
+          # roda com tee (stdout+stderr no arquivo)
+          # (usa bash -lc pra respeitar PATH/alias/profile)
+          bash -lc "bash /tmp/ga_cmd.sh" >"$LOG" 2>&1 || RC=$? || true
+          RC=${RC:-0}
 
-          for ID in $INSTANCE_IDS; do
-            echo "::group::Enviando comando para $ID"
+          # imprime até 1000 linhas finais (cabe no limite do SSM)
+          echo "--- BEGIN REMOTE LOG ---"
+          tail -n 1000 "$LOG" || true
+          echo "--- END REMOTE LOG ---"
+          echo "EXIT_CODE=$RC"
+          exit "$RC"
+          EOS
+          )
 
-            # JSON seguro para --parameters
-            PARAMS=$(jq -Rn --arg cmd "$REMOTE_CMD" '{commands: [$cmd]}')
+          # injeta o seu REMOTE_CMD dentro do wrapper
+          PAYLOAD=$(printf '%s' "$WRAPPED_CMD" | sed "s|__REMOTE_CMD_PLACEHOLDER__|$REMOTE_CMD|")
 
-            COMMAND_ID=$(aws ssm send-command \
-              --region "$AWS_REGION" \
-              --document-name "AWS-RunShellScript" \
-              --comment "GitHub Actions EC2 comando_ssm_no_ec2" \
-              --parameters "$PARAMS" \
-              --instance-ids "$ID" \
-              --query 'Command.CommandId' --output text)
+          # monta parâmetros do SSM com jq
+          PARAMS=$(jq -Rn --arg cmd "$PAYLOAD" '{commands: [$cmd]}')
 
-            echo "CommandId: $COMMAND_ID"
+          # envia
+          COMMAND_ID=$(aws ssm send-command \
+            --region "$AWS_REGION" \
+            --document-name "AWS-RunShellScript" \
+            --comment "GitHub Actions EC2 comando_ssm_no_ec2" \
+            --parameters "$PARAMS" \
+            --instance-ids "$ID" \
+            --query 'Command.CommandId' --output text)
 
-            #####################################################
-            #####################################################
-            #####################################################
-            # GCI=$(aws ssm get-command-invocation \
-            #   --region "$AWS_REGION" \
-            #   --command-id "$COMMAND_ID" \
-            #   --instance-id "$ID" \
-            #   --output json || true)
+          echo "CommandId: $COMMAND_ID"
 
-            # FINAL_STATUS=$(jq -r '.Status // "Unknown"' <<<"$GCI")
-            # PLUGIN_STATUS="$FINAL_STATUS"  # quando há 1 plugin, status do comando = do plugin
-            # RESPONSE_CODE=$(jq -r '.ResponseCode // empty' <<<"$GCI")
-            # STDOUT=$(jq -r '.StandardOutputContent // ""' <<<"$GCI")
-            # STDERR=$(jq -r '.StandardErrorContent  // ""' <<<"$GCI")
-
-            # # normaliza response code vazio quando sucesso
-            # if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
-            #   if [[ "$FINAL_STATUS" == "Success" ]]; then RESPONSE_CODE=0; else RESPONSE_CODE=-1; fi
-            # fi
-
-            # echo "FinalStatus=$FINAL_STATUS PluginStatus=$PLUGIN_STATUS ResponseCode=$RESPONSE_CODE"
-            # echo "--- STDOUT ---"
-            # printf "%s\n" "$STDOUT"
-            # echo "--- STDERR ---"
-            # printf "%s\n" "$STDERR"
-            #####################################################
-            #####################################################
-
-            attempt=0
-            while (( attempt < MAX_ATTEMPTS )); do
-              STATUS=$(aws ssm get-command-invocation \
-                --region "$AWS_REGION" \
-                --command-id "$COMMAND_ID" \
-                --instance-id "$ID" \
-                --query 'Status' --output text 2>/dev/null || echo "Pending")
-              echo "[$ID] Status: $STATUS"
-              case "$STATUS" in
-                Success|Cancelled|TimedOut|Failed) break ;;
-              esac
-              sleep "$INTERVAL"
-              attempt=$((attempt+1))
-            done
-
-            # Pega DETALHES por plugin (mais confiável que o agregado)
-            aws ssm list-command-invocations \
+          # espera status como você já faz
+          attempt=0
+          while (( attempt < MAX_ATTEMPTS )); do
+            STATUS=$(aws ssm get-command-invocation \
               --region "$AWS_REGION" \
               --command-id "$COMMAND_ID" \
               --instance-id "$ID" \
-              --details \
-              --output json > ssm_out.json || true
-
-            FINAL_STATUS=$(jq -r '.CommandInvocations[0].Status // "Unknown"' ssm_out.json 2>/dev/null || echo "Unknown")
-            PLUGIN_STATUS=$(jq -r '.CommandInvocations[0].CommandPlugins[] | select(.Name=="aws:runShellScript") | .Status' ssm_out.json 2>/dev/null | tail -n1 || echo "")
-            RESPONSE_CODE=$(jq -r '.CommandInvocations[0].CommandPlugins[] | select(.Name=="aws:runShellScript") | .ResponseCode' ssm_out.json 2>/dev/null | tail -n1 || echo "")
-            STDOUT=$(jq -r '.CommandInvocations[0].CommandPlugins[] | select(.Name=="aws:runShellScript") | .Output' ssm_out.json 2>/dev/null | tail -n1 || echo "")
-            STDERR=$(jq -r '.CommandInvocations[0].CommandPlugins[] | select(.Name=="aws:runShellScript") | .StandardErrorUrl' ssm_out.json 2>/dev/null | tail -n1 || echo "")
-
-            # Trata ResponseCode nulo quando o status foi Success
-            if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
-              if [[ "$FINAL_STATUS" == "Success" || "$PLUGIN_STATUS" == "Success" ]]; then
-                RESPONSE_CODE=0
-              else
-                RESPONSE_CODE=-1
-              fi
-            fi
-
-            echo "FinalStatus=$FINAL_STATUS PluginStatus=$PLUGIN_STATUS ResponseCode=$RESPONSE_CODE"
-            echo "--- STDOUT ---"
-            echo "$STDOUT"
-            echo "--- STDERR URL (se houver) ---"
-            echo "$STDERR"
-
-
-
-
-            # Só falha em casos reais
-            if [[ "$FINAL_STATUS" == "Failed" || "$FINAL_STATUS" == "TimedOut" || "$FINAL_STATUS" == "Cancelled" ]]; then
-              echo "::error title=SSM falhou para $ID::Status=$FINAL_STATUS"
-              FAIL=1
-            elif [[ "$PLUGIN_STATUS" == "Failed" || "$PLUGIN_STATUS" == "TimedOut" || "$PLUGIN_STATUS" == "Cancelled" ]]; then
-              echo "::error title=Plugin aws:runShellScript falhou para $ID::PluginStatus=$PLUGIN_STATUS"
-              FAIL=1
-            elif [[ "$RESPONSE_CODE" != "0" ]]; then
-              echo "::error title=Comando retornou código != 0 para $ID::ResponseCode=$RESPONSE_CODE"
-              FAIL=1
-            fi
-
-            echo "::endgroup::"
+              --query 'Status' --output text 2>/dev/null || echo "Pending")
+            echo "[$ID] Status: $STATUS"
+            case "$STATUS" in
+              Success|Cancelled|TimedOut|Failed) break ;;
+            esac
+            sleep "$INTERVAL"
+            attempt=$((attempt+1))
           done
 
-          exit $FAIL
+          # pega o conteúdo (até ~24KB por campo, mas nosso tail já resumiu)
+          GCI=$(aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$ID" \
+            --output json || true)
+
+          FINAL_STATUS=$(jq -r '.Status // "Unknown"' <<<"$GCI")
+          RESPONSE_CODE=$(jq -r '.ResponseCode // empty' <<<"$GCI")
+          STDOUT=$(jq -r '.StandardOutputContent // ""' <<<"$GCI")
+          STDERR=$(jq -r '.StandardErrorContent  // ""' <<<"$GCI")
+
+          # normaliza response code vazio quando sucesso
+          if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
+            if [[ "$FINAL_STATUS" == "Success" ]]; then RESPONSE_CODE=0; else RESPONSE_CODE=-1; fi
+          fi
+
+          echo "FinalStatus=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+          echo "--- STDOUT ---"; printf "%s\n" "$STDOUT"
+          echo "--- STDERR ---"; printf "%s\n" "$STDERR"
+
+          if [[ "$FINAL_STATUS" == "Failed" || "$FINAL_STATUS" == "TimedOut" || "$FINAL_STATUS" == "Cancelled" || "$RESPONSE_CODE" != "0" ]]; then
+            echo "::error title=SSM falhou para $ID::Status=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+            FAIL=1
+          fi
+
+          # set -euo pipefail
+
+          # : "${MAX_ATTEMPTS:=60}"
+          # : "${INTERVAL:=5}"
+          # [[ "$MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || MAX_ATTEMPTS=60
+          # [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=5
+          # echo "MAX_ATTEMPTS=$MAX_ATTEMPTS INTERVAL=$INTERVAL"
+
+          # FAIL=0
+
+          # for ID in $INSTANCE_IDS; do
+          #   echo "::group::Enviando comando para $ID"
+
+          #   # JSON seguro para --parameters
+          #   PARAMS=$(jq -Rn --arg cmd "$REMOTE_CMD" '{commands: [$cmd]}')
+
+          #   COMMAND_ID=$(aws ssm send-command \
+          #     --region "$AWS_REGION" \
+          #     --document-name "AWS-RunShellScript" \
+          #     --comment "GitHub Actions EC2 comando_ssm_no_ec2" \
+          #     --parameters "$PARAMS" \
+          #     --instance-ids "$ID" \
+          #     --query 'Command.CommandId' --output text)
+
+          #   echo "CommandId: $COMMAND_ID"
+
+          #   #####################################################
+          #   #####################################################
+          #   #####################################################
+          #   # GCI=$(aws ssm get-command-invocation \
+          #   #   --region "$AWS_REGION" \
+          #   #   --command-id "$COMMAND_ID" \
+          #   #   --instance-id "$ID" \
+          #   #   --output json || true)
+
+          #   # FINAL_STATUS=$(jq -r '.Status // "Unknown"' <<<"$GCI")
+          #   # PLUGIN_STATUS="$FINAL_STATUS"  # quando há 1 plugin, status do comando = do plugin
+          #   # RESPONSE_CODE=$(jq -r '.ResponseCode // empty' <<<"$GCI")
+          #   # STDOUT=$(jq -r '.StandardOutputContent // ""' <<<"$GCI")
+          #   # STDERR=$(jq -r '.StandardErrorContent  // ""' <<<"$GCI")
+
+          #   # # normaliza response code vazio quando sucesso
+          #   # if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
+          #   #   if [[ "$FINAL_STATUS" == "Success" ]]; then RESPONSE_CODE=0; else RESPONSE_CODE=-1; fi
+          #   # fi
+
+          #   # echo "FinalStatus=$FINAL_STATUS PluginStatus=$PLUGIN_STATUS ResponseCode=$RESPONSE_CODE"
+          #   # echo "--- STDOUT ---"
+          #   # printf "%s\n" "$STDOUT"
+          #   # echo "--- STDERR ---"
+          #   # printf "%s\n" "$STDERR"
+          #   #####################################################
+          #   #####################################################
+
+          #   attempt=0
+          #   while (( attempt < MAX_ATTEMPTS )); do
+          #     STATUS=$(aws ssm get-command-invocation \
+          #       --region "$AWS_REGION" \
+          #       --command-id "$COMMAND_ID" \
+          #       --instance-id "$ID" \
+          #       --query 'Status' --output text 2>/dev/null || echo "Pending")
+          #     echo "[$ID] Status: $STATUS"
+          #     case "$STATUS" in
+          #       Success|Cancelled|TimedOut|Failed) break ;;
+          #     esac
+          #     sleep "$INTERVAL"
+          #     attempt=$((attempt+1))
+          #   done
+
+          #   # Pega DETALHES por plugin (mais confiável que o agregado)
+          #   aws ssm list-command-invocations \
+          #     --region "$AWS_REGION" \
+          #     --command-id "$COMMAND_ID" \
+          #     --instance-id "$ID" \
+          #     --details \
+          #     --output json > ssm_out.json || true
+
+          #   FINAL_STATUS=$(jq -r '.CommandInvocations[0].Status // "Unknown"' ssm_out.json 2>/dev/null || echo "Unknown")
+          #   PLUGIN_STATUS=$(jq -r '.CommandInvocations[0].CommandPlugins[] | select(.Name=="aws:runShellScript") | .Status' ssm_out.json 2>/dev/null | tail -n1 || echo "")
+          #   RESPONSE_CODE=$(jq -r '.CommandInvocations[0].CommandPlugins[] | select(.Name=="aws:runShellScript") | .ResponseCode' ssm_out.json 2>/dev/null | tail -n1 || echo "")
+          #   STDOUT=$(jq -r '.CommandInvocations[0].CommandPlugins[] | select(.Name=="aws:runShellScript") | .Output' ssm_out.json 2>/dev/null | tail -n1 || echo "")
+          #   STDERR=$(jq -r '.CommandInvocations[0].CommandPlugins[] | select(.Name=="aws:runShellScript") | .StandardErrorUrl' ssm_out.json 2>/dev/null | tail -n1 || echo "")
+
+          #   # Trata ResponseCode nulo quando o status foi Success
+          #   if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
+          #     if [[ "$FINAL_STATUS" == "Success" || "$PLUGIN_STATUS" == "Success" ]]; then
+          #       RESPONSE_CODE=0
+          #     else
+          #       RESPONSE_CODE=-1
+          #     fi
+          #   fi
+
+          #   echo "FinalStatus=$FINAL_STATUS PluginStatus=$PLUGIN_STATUS ResponseCode=$RESPONSE_CODE"
+          #   echo "--- STDOUT ---"
+          #   echo "$STDOUT"
+          #   echo "--- STDERR URL (se houver) ---"
+          #   echo "$STDERR"
+
+
+
+
+          #   # Só falha em casos reais
+          #   if [[ "$FINAL_STATUS" == "Failed" || "$FINAL_STATUS" == "TimedOut" || "$FINAL_STATUS" == "Cancelled" ]]; then
+          #     echo "::error title=SSM falhou para $ID::Status=$FINAL_STATUS"
+          #     FAIL=1
+          #   elif [[ "$PLUGIN_STATUS" == "Failed" || "$PLUGIN_STATUS" == "TimedOut" || "$PLUGIN_STATUS" == "Cancelled" ]]; then
+          #     echo "::error title=Plugin aws:runShellScript falhou para $ID::PluginStatus=$PLUGIN_STATUS"
+          #     FAIL=1
+          #   elif [[ "$RESPONSE_CODE" != "0" ]]; then
+          #     echo "::error title=Comando retornou código != 0 para $ID::ResponseCode=$RESPONSE_CODE"
+          #     FAIL=1
+          #   fi
+
+          #   echo "::endgroup::"
+          # done
+
+          # exit $FAIL
 
 
       - name: Sem alvos compatíveis
