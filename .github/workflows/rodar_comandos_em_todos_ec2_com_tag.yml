@@ -106,20 +106,22 @@ jobs:
           echo "--- BEGIN REMOTE LOG ---"; tail -n 2000 "$LOG" || true; echo "--- END REMOTE LOG ---"; \
           echo EXIT_CODE=$RC; exit $RC'\'''
 
-            PARAMS="$(jq -n --arg c1 "$C1" --arg c2 "$C2" '{commands: [$c1, $c2]}')"
+            # 3) Escreve o parameters em arquivo (forma mais estável pro CLI)
+            PARAMS_FILE="$(mktemp)"
+            jq -n --arg c1 "$C1" --arg c2 "$C2" '{commands: [$c1, $c2]}' > "$PARAMS_FILE"
 
-            # 3) Envia
+            # 4) Envia
             COMMAND_ID=$(aws ssm send-command \
               --region "$AWS_REGION" \
               --document-name "AWS-RunShellScript" \
               --comment "GitHub Actions EC2 comando_ssm_no_ec2" \
-              --parameters "$PARAMS" \
+              --parameters "file://$PARAMS_FILE" \
               --instance-ids "$ID" \
               --query 'Command.CommandId' --output text)
 
             echo "CommandId: $COMMAND_ID"
 
-            # 4) Espera terminar
+            # 5) Espera terminar
             attempt=0
             while (( attempt < MAX_ATTEMPTS )); do
               STATUS=$(aws ssm get-command-invocation \
@@ -134,7 +136,7 @@ jobs:
               sleep "$INTERVAL"; attempt=$((attempt+1))
             done
 
-            # 5) Coleta saídas finais (o wrapper já imprimiu o log grande)
+            # 6) Coleta saídas finais (o wrapper já imprimiu o log principal)
             GCI=$(aws ssm get-command-invocation \
               --region "$AWS_REGION" \
               --command-id "$COMMAND_ID" \
@@ -152,17 +154,8 @@ jobs:
 
             echo "FinalStatus=$FINAL_STATUS PluginStatus=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
             echo "--- STDOUT ---"; printf "%s\n" "$STDOUT"
-            echo "--- STDERR ---"; printf "%s\n" "$STDERR"
+            echo "--- STDERR ---"; printf "%s\n" "$STDERR
 
-            if [[ "$FINAL_STATUS" == "Failed" || "$FINAL_STATUS" == "TimedOut" || "$FINAL_STATUS" == "Cancelled" || "$RESPONSE_CODE" != "0" ]]; then
-              echo "::error title=SSM falhou para $ID::Status=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
-              FAIL=1
-            fi
-
-            echo "::endgroup::"
-          done
-
-          exit $FAIL
 
           # set -euo pipefail
 
