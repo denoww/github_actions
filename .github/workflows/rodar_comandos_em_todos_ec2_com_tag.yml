@@ -83,92 +83,115 @@ jobs:
           MAX_ATTEMPTS: ${{ inputs.max_attempts }}
           INTERVAL:     ${{ inputs.interval_secs }}
         run: |
-          # JSON seguro com um wrapper que SEMPRE imprime logs e preserva exit code
-          WRAPPED_CMD=$(cat <<'EOS'
+          set -euo pipefail
+
+          : "${MAX_ATTEMPTS:=60}"
+          : "${INTERVAL:=5}"
+          [[ "$MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || MAX_ATTEMPTS=60
+          [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=5
+          echo "MAX_ATTEMPTS=$MAX_ATTEMPTS INTERVAL=$INTERVAL"
+
+          # 1) Codifica o comando remoto para evitar problemas de quoting
+          REMOTE_CMD_B64="$(printf '%s' "$REMOTE_CMD" | base64 -w0)"  # GNU coreutils no ubuntu-latest
+
+          FAIL=0
+          for ID in $INSTANCE_IDS; do
+            echo "::group::Enviando comando para $ID"
+
+            # 2) Wrapper que:
+            #   - habilita set -euxo pipefail
+            #   - grava tudo em /tmp/ga_cmd.out
+            #   - decodifica o script do usuário (base64) para /tmp/ga_cmd.sh
+            #   - executa e imprime as últimas 1000 linhas do log
+            #   - retorna o mesmo exit code
+            read -r -d '' WRAPPED_CMD <<'EOS'
           set -euxo pipefail
           LOG=/tmp/ga_cmd.out
-          # script inline para capturar tudo
-          cat >/tmp/ga_cmd.sh <<'EOI'
-          set -euxo pipefail
+
+          # escreve o script do usuário a partir de base64
+          : "${REMOTE_CMD_B64:?missing}"
+          printf '%s' "$REMOTE_CMD_B64" | base64 -d >/tmp/ga_cmd.sh
+
+          # garante permissões e ambiente
+          chmod +x /tmp/ga_cmd.sh
           export HOME="${HOME:-/root}"
 
-          # ===== AQUI ENTRA O SEU COMANDO ORIGINAL =====
-          __REMOTE_CMD_PLACEHOLDER__
-          # ===== FIM DO COMANDO ORIGINAL =====
-          EOI
-
-          # roda com tee (stdout+stderr no arquivo)
-          # (usa bash -lc pra respeitar PATH/alias/profile)
+          # executa capturando stdout+stderr no arquivo
           bash -lc "bash /tmp/ga_cmd.sh" >"$LOG" 2>&1 || RC=$? || true
-          RC=${RC:-0}
+          RC="${RC:-0}"
 
-          # imprime até 1000 linhas finais (cabe no limite do SSM)
           echo "--- BEGIN REMOTE LOG ---"
           tail -n 1000 "$LOG" || true
           echo "--- END REMOTE LOG ---"
           echo "EXIT_CODE=$RC"
           exit "$RC"
           EOS
-          )
 
-          # injeta o seu REMOTE_CMD dentro do wrapper
-          PAYLOAD=$(printf '%s' "$WRAPPED_CMD" | sed "s|__REMOTE_CMD_PLACEHOLDER__|$REMOTE_CMD|")
+            # 3) Injeta o REMOTE_CMD_B64 no wrapper sem sed, usando variável de ambiente
+            #    Vamos montar um comando único que exporta REMOTE_CMD_B64 e roda o wrapper.
+            FULL_CMD="export REMOTE_CMD_B64='$REMOTE_CMD_B64'; $WRAPPED_CMD"
 
-          # monta parâmetros do SSM com jq
-          PARAMS=$(jq -Rn --arg cmd "$PAYLOAD" '{commands: [$cmd]}')
+            # 4) Parâmetros do SSM (JSON seguro)
+            PARAMS="$(jq -Rn --arg cmd "$FULL_CMD" '{commands: [$cmd]}')"
 
-          # envia
-          COMMAND_ID=$(aws ssm send-command \
-            --region "$AWS_REGION" \
-            --document-name "AWS-RunShellScript" \
-            --comment "GitHub Actions EC2 comando_ssm_no_ec2" \
-            --parameters "$PARAMS" \
-            --instance-ids "$ID" \
-            --query 'Command.CommandId' --output text)
+            # 5) Envia o comando
+            COMMAND_ID=$(aws ssm send-command \
+              --region "$AWS_REGION" \
+              --document-name "AWS-RunShellScript" \
+              --comment "GitHub Actions EC2 comando_ssm_no_ec2" \
+              --parameters "$PARAMS" \
+              --instance-ids "$ID" \
+              --query 'Command.CommandId' --output text)
 
-          echo "CommandId: $COMMAND_ID"
+            echo "CommandId: $COMMAND_ID"
 
-          # espera status como você já faz
-          attempt=0
-          while (( attempt < MAX_ATTEMPTS )); do
-            STATUS=$(aws ssm get-command-invocation \
+            # 6) Espera conclusão
+            attempt=0
+            while (( attempt < MAX_ATTEMPTS )); do
+              STATUS=$(aws ssm get-command-invocation \
+                --region "$AWS_REGION" \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$ID" \
+                --query 'Status' --output text 2>/dev/null || echo "Pending")
+              echo "[$ID] Status: $STATUS"
+              case "$STATUS" in
+                Success|Cancelled|TimedOut|Failed) break ;;
+              esac
+              sleep "$INTERVAL"
+              attempt=$((attempt+1))
+            done
+
+            # 7) Busca conteúdo final (até ~24KB por campo – suficiente com nosso tail)
+            GCI=$(aws ssm get-command-invocation \
               --region "$AWS_REGION" \
               --command-id "$COMMAND_ID" \
               --instance-id "$ID" \
-              --query 'Status' --output text 2>/dev/null || echo "Pending")
-            echo "[$ID] Status: $STATUS"
-            case "$STATUS" in
-              Success|Cancelled|TimedOut|Failed) break ;;
-            esac
-            sleep "$INTERVAL"
-            attempt=$((attempt+1))
+              --output json || true)
+
+            FINAL_STATUS=$(jq -r '.Status // "Unknown"' <<<"$GCI")
+            RESPONSE_CODE=$(jq -r '.ResponseCode // empty' <<<"$GCI")
+            STDOUT=$(jq -r '.StandardOutputContent // ""' <<<"$GCI")
+            STDERR=$(jq -r '.StandardErrorContent  // ""' <<<"$GCI")
+
+            # normaliza response code vazio quando sucesso
+            if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
+              if [[ "$FINAL_STATUS" == "Success" ]]; then RESPONSE_CODE=0; else RESPONSE_CODE=-1; fi
+            fi
+
+            echo "FinalStatus=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+            echo "--- STDOUT ---"; printf "%s\n" "$STDOUT"
+            echo "--- STDERR ---"; printf "%s\n" "$STDERR"
+
+            if [[ "$FINAL_STATUS" == "Failed" || "$FINAL_STATUS" == "TimedOut" || "$FINAL_STATUS" == "Cancelled" || "$RESPONSE_CODE" != "0" ]]; then
+              echo "::error title=SSM falhou para $ID::Status=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+              FAIL=1
+            fi
+
+            echo "::endgroup::"
           done
 
-          # pega o conteúdo (até ~24KB por campo, mas nosso tail já resumiu)
-          GCI=$(aws ssm get-command-invocation \
-            --region "$AWS_REGION" \
-            --command-id "$COMMAND_ID" \
-            --instance-id "$ID" \
-            --output json || true)
+          exit $FAIL
 
-          FINAL_STATUS=$(jq -r '.Status // "Unknown"' <<<"$GCI")
-          RESPONSE_CODE=$(jq -r '.ResponseCode // empty' <<<"$GCI")
-          STDOUT=$(jq -r '.StandardOutputContent // ""' <<<"$GCI")
-          STDERR=$(jq -r '.StandardErrorContent  // ""' <<<"$GCI")
-
-          # normaliza response code vazio quando sucesso
-          if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
-            if [[ "$FINAL_STATUS" == "Success" ]]; then RESPONSE_CODE=0; else RESPONSE_CODE=-1; fi
-          fi
-
-          echo "FinalStatus=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
-          echo "--- STDOUT ---"; printf "%s\n" "$STDOUT"
-          echo "--- STDERR ---"; printf "%s\n" "$STDERR"
-
-          if [[ "$FINAL_STATUS" == "Failed" || "$FINAL_STATUS" == "TimedOut" || "$FINAL_STATUS" == "Cancelled" || "$RESPONSE_CODE" != "0" ]]; then
-            echo "::error title=SSM falhou para $ID::Status=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
-            FAIL=1
-          fi
 
           # set -euo pipefail
 
