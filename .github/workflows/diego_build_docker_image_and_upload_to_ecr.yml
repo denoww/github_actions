@@ -66,13 +66,13 @@ jobs:
           IMAGE_SHA="$REGISTRY/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}"
           CACHE_IMAGE="$REGISTRY/${{ inputs.ecr_repository }}:buildcache"
 
-          # Garante que estamos usando BuildKit com buildx
-          docker buildx create --use --name buildkit-builder || docker buildx use buildkit-builder
-          docker buildx inspect --bootstrap
-
           echo "copiando variáveis de ambiente" >> "$GITHUB_OUTPUT"
           aws s3 cp "s3://sc-environments/${{ inputs.env_file }}.env" envs/
           aws s3 cp "s3://sc-environments/${{ inputs.env_file2 }}.env" envs/
+
+          # Garante que estamos usando BuildKit com buildx
+          docker buildx create --use --name buildkit-builder || docker buildx use buildkit-builder
+          docker buildx inspect --bootstrap
 
           # Faz o build com cache remoto
           docker buildx build \
