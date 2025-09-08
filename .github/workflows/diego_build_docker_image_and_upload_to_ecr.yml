@@ -60,7 +60,7 @@ jobs:
           set -euo pipefail
           IMAGE_SHA="$REGISTRY/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}"
           docker pull "$REGISTRY/${{ inputs.ecr_repository }}:latest" || true
-          docker build -f "${{ inputs.dockerfile }}" -t "$IMAGE_SHA" "${{ inputs.build_context }}"
+          docker build --cache-from "$REGISTRY/${{ inputs.ecr_repository }}:latest" -f "${{ inputs.dockerfile }}" -t "$IMAGE_SHA" "${{ inputs.build_context }}"
           docker push "$IMAGE_SHA"
           echo "image_sha=$IMAGE_SHA" >> "$GITHUB_OUTPUT"
 
