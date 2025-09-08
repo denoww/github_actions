@@ -22,6 +22,10 @@ on:
       push_latest:
         type: boolean
         default: true
+      env_file:
+        type: string
+      env_file2:
+        type: string
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
