@@ -1,4 +1,4 @@
-# build_docker_image_and_upload_to_ecr.yml
+# diego_build_docker_image_and_upload_to_ecr.yml
 name: Reusable • ECR pull & build & push
 
 on:
@@ -59,9 +59,16 @@ jobs:
         run: |
           set -euo pipefail
           IMAGE_SHA="$REGISTRY/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}"
-          docker pull "$REGISTRY/${{ inputs.ecr_repository }}:latest" || true
-          docker build --cache-from "$REGISTRY/${{ inputs.ecr_repository }}:latest" -f "${{ inputs.dockerfile }}" -t "$IMAGE_SHA" "${{ inputs.build_context }}"
+          docker pull "$REGISTRY/${{ inputs.ecr_repository }}:cache" || true
+          docker build \
+            --cache-from=type="$REGISTRY/${{ inputs.ecr_repository }}:cache" \
+            --cache-to=type="$REGISTRY/${{ inputs.ecr_repository }}:cache",mode=max \
+            -f "${{ inputs.dockerfile }}" \
+            -t "$IMAGE_SHA" "${{ inputs.build_context }}"
           docker push "$IMAGE_SHA"
+
+          docker push "$REGISTRY/${{ inputs.ecr_repository }}":cache
+          
           echo "image_sha=$IMAGE_SHA" >> "$GITHUB_OUTPUT"
 
           if [ "${{ inputs.push_latest }}" = "true" ]; then
