@@ -66,6 +66,7 @@ jobs:
           IMAGE_SHA="$REGISTRY/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}"
           CACHE_IMAGE="$REGISTRY/${{ inputs.ecr_repository }}:buildcache"
 
+          # Copiando variáveis de ambiente
           aws s3 cp "s3://sc-environments/${{ inputs.env_file }}.env" envs/ || true
           aws s3 cp "s3://sc-environments/${{ inputs.env_file2 }}.env" envs/ || true
 
