@@ -58,22 +58,28 @@ jobs:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           set -euo pipefail
-          IMAGE_SHA="$REGISTRY/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}"
-          docker pull "$REGISTRY/${{ inputs.ecr_repository }}:cache" || true
-          docker build \
-            --cache-from=type="$REGISTRY/${{ inputs.ecr_repository }}:cache" \
-            --cache-to=type="$REGISTRY/${{ inputs.ecr_repository }}:cache",mode=max \
-            -f "${{ inputs.dockerfile }}" \
-            -t "$IMAGE_SHA" "${{ inputs.build_context }}"
-          docker push "$IMAGE_SHA"
 
-          docker push "$REGISTRY/${{ inputs.ecr_repository }}":cache
-          
-          echo "image_sha=$IMAGE_SHA" >> "$GITHUB_OUTPUT"
+          IMAGE_SHA="$REGISTRY/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}"
+          CACHE_IMAGE="$REGISTRY/${{ inputs.ecr_repository }}:buildcache"
+
+          # Garante que estamos usando BuildKit com buildx
+          docker buildx create --use --name buildkit-builder || docker buildx use buildkit-builder
+          docker buildx inspect --bootstrap
+
+          # Faz o build com cache remoto
+          docker buildx build \
+            --platform linux/amd64 \
+            --cache-from=type=registry,ref="$CACHE_IMAGE" \
+            --cache-to=type=registry,ref="$CACHE_IMAGE",mode=max \
+            -f "${{ inputs.dockerfile }}" \
+            -t "$IMAGE_SHA" \
+            "${{ inputs.build_context }}" \
+            --push
 
           if [ "${{ inputs.push_latest }}" = "true" ]; then
             IMAGE_LATEST="$REGISTRY/${{ inputs.ecr_repository }}:latest"
-            docker tag "$IMAGE_SHA" "$IMAGE_LATEST"
-            docker push "$IMAGE_LATEST"
+            docker buildx imagetools create -t "$IMAGE_LATEST" "$IMAGE_SHA"
             echo "image_latest=$IMAGE_LATEST" >> "$GITHUB_OUTPUT"
           fi
+
+          echo "image_sha=$IMAGE_SHA" >> "$GITHUB_OUTPUT"
