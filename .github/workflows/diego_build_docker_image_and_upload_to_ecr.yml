@@ -67,8 +67,8 @@ jobs:
           CACHE_IMAGE="$REGISTRY/${{ inputs.ecr_repository }}:buildcache"
 
           echo "copiando variáveis de ambiente" >> "$GITHUB_OUTPUT"
-          aws s3 cp "s3://sc-environments/${{ inputs.env_file }}.env" envs/
-          aws s3 cp "s3://sc-environments/${{ inputs.env_file2 }}.env" envs/
+          aws s3 cp "s3://sc-environments/${{ inputs.env_file }}.env" envs/ || true
+          aws s3 cp "s3://sc-environments/${{ inputs.env_file2 }}.env" envs/ || true
 
           # Garante que estamos usando BuildKit com buildx
           docker buildx create --use --name buildkit-builder || docker buildx use buildkit-builder
