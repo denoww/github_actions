@@ -63,6 +63,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Incrementando versão
+          # Incrementando versão
+          aws s3 cp "s3://sc-environments/${{ inputs.env_file }}-version.env" .app_version || echo "0" > .app_version
+          VERSION=$(cat .app_version | tr -d '\n' | tr -d '\r' || echo 0)
+          NEW_VERSION=$((VERSION + 1))
+          echo $NEW_VERSION > .app_version
+          aws s3 cp .app_version "s3://sc-environments/${{ inputs.env_file }}-version.env" --acl private
+          # Incrementando versão
+          # Incrementando versão
+
           IMAGE_SHA="$REGISTRY/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}"
           CACHE_IMAGE="$REGISTRY/${{ inputs.ecr_repository }}:buildcache"
 
