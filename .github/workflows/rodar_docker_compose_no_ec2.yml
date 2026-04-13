@@ -1,0 +1,175 @@
+name: Reusable • docker compose no EC2
+
+on:
+  workflow_call:
+    inputs:
+      aws_region:
+        type: string
+        default: us-east-1
+      ec2_com_tag:
+        description: "Token a procurar dentro da tag 'projetos' (CSV-aware)"
+        type: string
+        required: true
+      tag_key:
+        description: "Chave da tag usada no filtro"
+        type: string
+        default: projetos
+      workdir:
+        description: "Diretório do docker-compose na EC2"
+        type: string
+        required: true
+      compose_file:
+        description: "Nome do arquivo compose"
+        type: string
+        default: docker-compose.yml
+      services:
+        description: "Services específicos a subir (vazio = todos)"
+        type: string
+        default: ""
+      pull_before:
+        description: "Executa docker compose pull antes do up"
+        type: boolean
+        default: true
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  docker_compose_no_ec2:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Descobrir instâncias alvo (tag CSV-aware)
+        id: discover
+        shell: bash
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          TAG_KEY: ${{ inputs.tag_key }}
+          PROJECT_TOKEN: ${{ inputs.ec2_com_tag }}
+        run: |
+          set -euo pipefail
+          aws ec2 describe-instances \
+            --region "$AWS_REGION" \
+            --filters Name=instance-state-name,Values=running Name=tag-key,Values="$TAG_KEY" \
+            --query 'Reservations[].Instances[].[InstanceId,Tags]' \
+            --output json > instances.json
+
+          ids=$(jq -r --arg tok "$PROJECT_TOKEN" --arg key "$TAG_KEY" '
+            .[]
+            | {id: .[0], tags: (.[1] // [])}
+            | (.tags[]? | select(.Key==$key) | .Value // "" | gsub("\\s";"")) as $val
+            | select($val | test("(^|,)" + $tok + "(,|$)"))
+            | .id
+          ' instances.json | sort -u | tr '\n' ' ')
+
+          echo "Targets: ${ids:-<none>}"
+          echo "instance_ids=${ids}" >> "$GITHUB_OUTPUT"
+
+      - name: Executar docker compose via SSM
+        if: steps.discover.outputs.instance_ids != ''
+        shell: bash
+        env:
+          AWS_REGION:   ${{ inputs.aws_region }}
+          INSTANCE_IDS: ${{ steps.discover.outputs.instance_ids }}
+          WORKDIR:      ${{ inputs.workdir }}
+          COMPOSE_FILE: ${{ inputs.compose_file }}
+          SERVICES:     ${{ inputs.services }}
+          PULL_BEFORE:  ${{ inputs.pull_before }}
+        run: |
+          set -euo pipefail
+
+          # Monta o comando remoto
+          REMOTE_CMD="set -euo pipefail; cd \"$WORKDIR\""
+
+          if [ "$PULL_BEFORE" = "true" ]; then
+            REMOTE_CMD="$REMOTE_CMD && docker compose -f \"$COMPOSE_FILE\" pull $SERVICES"
+          fi
+
+          REMOTE_CMD="$REMOTE_CMD && docker compose -f \"$COMPOSE_FILE\" up -d $SERVICES"
+
+          echo "Comando que será executado nas instâncias:"
+          echo "  $REMOTE_CMD"
+
+          REMOTE_CMD_B64="$(printf '%s' "$REMOTE_CMD" | base64 | tr -d '\n')"
+
+          C1="printf %s '$REMOTE_CMD_B64' > /tmp/ga_cmd.sh.b64"
+          C2='/bin/bash -lc '\''set -euxo pipefail; LOG=/tmp/ga_cmd.out; \
+          base64 -d /tmp/ga_cmd.sh.b64 > /tmp/ga_cmd.sh; chmod +x /tmp/ga_cmd.sh; \
+          bash -lc "bash /tmp/ga_cmd.sh" > "$LOG" 2>&1 || RC=$? || true; RC=${RC:-0}; \
+          echo "--- BEGIN REMOTE LOG ---"; tail -n 2000 "$LOG" || true; echo "--- END REMOTE LOG ---"; \
+          echo EXIT_CODE=$RC; exit $RC'\'''
+
+          FAIL=0
+          for ID in $INSTANCE_IDS; do
+            echo "::group::Executando docker compose em $ID"
+
+            PARAMS_FILE="$(mktemp)"
+            jq -n --arg c1 "$C1" --arg c2 "$C2" '{commands: [$c1, $c2]}' > "$PARAMS_FILE"
+
+            COMMAND_ID=$(aws ssm send-command \
+              --region "$AWS_REGION" \
+              --document-name "AWS-RunShellScript" \
+              --comment "GitHub Actions docker compose up" \
+              --parameters "file://$PARAMS_FILE" \
+              --instance-ids "$ID" \
+              --query 'Command.CommandId' --output text)
+
+            echo "CommandId: $COMMAND_ID"
+
+            attempt=0
+            while (( attempt < 60 )); do
+              STATUS=$(aws ssm get-command-invocation \
+                --region "$AWS_REGION" \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$ID" \
+                --query 'Status' --output text 2>/dev/null || echo "Pending")
+              echo "[$ID] Status: $STATUS"
+              case "$STATUS" in
+                Success|Cancelled|TimedOut|Failed) break ;;
+              esac
+              sleep 5; attempt=$((attempt+1))
+            done
+
+            GCI=$(aws ssm get-command-invocation \
+              --region "$AWS_REGION" \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$ID" \
+              --output json || true)
+
+            FINAL_STATUS=$(jq -r '.Status // "Unknown"' <<<"$GCI")
+            RESPONSE_CODE=$(jq -r '.ResponseCode // empty' <<<"$GCI")
+            STDOUT=$(jq -r '.StandardOutputContent // ""' <<<"$GCI")
+            STDERR=$(jq -r '.StandardErrorContent  // ""' <<<"$GCI")
+
+            if [[ -z "${RESPONSE_CODE}" || "${RESPONSE_CODE}" == "null" ]]; then
+              if [[ "$FINAL_STATUS" == "Success" ]]; then RESPONSE_CODE=0; else RESPONSE_CODE=-1; fi
+            fi
+
+            echo "FinalStatus=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+            echo "--- STDOUT ---"; printf "%s\n" "$STDOUT"
+            echo "--- STDERR ---"; printf "%s\n" "$STDERR"
+
+            if [[ "$FINAL_STATUS" == "Failed" || "$FINAL_STATUS" == "TimedOut" || "$FINAL_STATUS" == "Cancelled" || "$RESPONSE_CODE" != "0" ]]; then
+              echo "::error title=docker compose falhou em $ID::Status=$FINAL_STATUS ResponseCode=$RESPONSE_CODE"
+              FAIL=1
+            fi
+
+            echo "::endgroup::"
+          done
+
+          exit $FAIL
+
+      - name: Sem alvos compatíveis
+        if: steps.discover.outputs.instance_ids == ''
+        run: echo "Nenhuma instância com tag '${{ inputs.tag_key }}' contendo '${{ inputs.ec2_com_tag }}'."
