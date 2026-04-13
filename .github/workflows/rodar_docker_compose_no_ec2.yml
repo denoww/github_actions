@@ -30,6 +30,10 @@ on:
         description: "Executa docker compose pull antes do up"
         type: boolean
         default: true
+      s3_compose_uri:
+        description: "URI S3 do docker-compose.yml a baixar na EC2 (ex: s3://bucket/path/docker-compose.yml)"
+        type: string
+        default: ""
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -82,15 +86,22 @@ jobs:
         env:
           AWS_REGION:   ${{ inputs.aws_region }}
           INSTANCE_IDS: ${{ steps.discover.outputs.instance_ids }}
-          WORKDIR:      ${{ inputs.workdir }}
-          COMPOSE_FILE: ${{ inputs.compose_file }}
-          SERVICES:     ${{ inputs.services }}
-          PULL_BEFORE:  ${{ inputs.pull_before }}
+          WORKDIR:          ${{ inputs.workdir }}
+          COMPOSE_FILE:     ${{ inputs.compose_file }}
+          SERVICES:         ${{ inputs.services }}
+          PULL_BEFORE:      ${{ inputs.pull_before }}
+          S3_COMPOSE_URI:   ${{ inputs.s3_compose_uri }}
         run: |
           set -euo pipefail
 
           # Monta o comando remoto
-          REMOTE_CMD="set -euo pipefail; cd \"$WORKDIR\""
+          REMOTE_CMD="set -euo pipefail; mkdir -p \"$WORKDIR\""
+
+          if [ -n "$S3_COMPOSE_URI" ]; then
+            REMOTE_CMD="$REMOTE_CMD && aws s3 cp \"$S3_COMPOSE_URI\" \"$WORKDIR/$COMPOSE_FILE\""
+          fi
+
+          REMOTE_CMD="$REMOTE_CMD && cd \"$WORKDIR\""
 
           if [ "$PULL_BEFORE" = "true" ]; then
             REMOTE_CMD="$REMOTE_CMD && docker compose -f \"$COMPOSE_FILE\" pull $SERVICES"
