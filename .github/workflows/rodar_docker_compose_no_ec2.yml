@@ -34,6 +34,10 @@ on:
         description: "URI S3 do docker-compose.yml a baixar na EC2 (ex: s3://bucket/path/docker-compose.yml)"
         type: string
         default: ""
+      s3_env_uri:
+        description: "URI S3 do .env a baixar na EC2 (ex: s3://bucket/path/.env)"
+        type: string
+        default: ""
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -91,6 +95,7 @@ jobs:
           SERVICES:         ${{ inputs.services }}
           PULL_BEFORE:      ${{ inputs.pull_before }}
           S3_COMPOSE_URI:   ${{ inputs.s3_compose_uri }}
+          S3_ENV_URI:       ${{ inputs.s3_env_uri }}
         run: |
           set -euo pipefail
 
@@ -99,6 +104,10 @@ jobs:
 
           if [ -n "$S3_COMPOSE_URI" ]; then
             REMOTE_CMD="$REMOTE_CMD && aws s3 cp \"$S3_COMPOSE_URI\" \"$WORKDIR/$COMPOSE_FILE\""
+          fi
+
+          if [ -n "$S3_ENV_URI" ]; then
+            REMOTE_CMD="$REMOTE_CMD && aws s3 cp \"$S3_ENV_URI\" \"$WORKDIR/.env\""
           fi
 
           REMOTE_CMD="$REMOTE_CMD && cd \"$WORKDIR\""
