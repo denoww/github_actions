@@ -4,6 +4,15 @@ name: Reusable • ECR pull & build & push
 on:
   workflow_call:
     inputs:
+      ref:
+        # SHA, branch ou tag pra checar out. Default vazio = comportamento
+        # padrão do actions/checkout (usa github.ref/github.sha do caller).
+        # Necessário quando o caller fez merge na mesma run e o github.sha
+        # do trigger aponta pro código pré-merge — sem isso o build pega
+        # snapshot antigo e o ECR fica com tag nova apontando pra conteúdo
+        # velho.
+        type: string
+        default: ''
       aws_region:
         type: string
         default: us-east-1
@@ -44,6 +53,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
