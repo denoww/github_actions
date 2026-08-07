@@ -1,0 +1,43 @@
+# Guarda de deriva: os workflows reusáveis embutem o corpo dos scripts de `scripts/`.
+#
+# Sem esta checagem, a cópia versionada vira teatro: alguém edita o `.sh`, esquece de
+# regenerar, e produção segue rodando o conteúdo velho embutido no YAML — o pior estado
+# possível, porque o repo *parece* ser a fonte da verdade e não é. Ver PSC-48.
+name: verifica embed dos scripts
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/restart_server_no_ec2.yml'
+      - '.github/workflows/ligar_ec2_nos_loadbalancers.yml'
+      - '.github/workflows/verifica_embed.yml'
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  verifica:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar pyyaml
+        run: pip install --quiet pyyaml
+
+      # 1. O YAML commitado é exatamente o que o gerador produz hoje?
+      #    Pega o caso "editei o .sh e esqueci de regenerar".
+      - name: Workflows gerados estão atualizados
+        run: bash scripts/gerar_workflows.sh --check
+
+      # 2. O script extraído de volta do YAML é byte-idêntico ao .sh?
+      #    Pega um bug NO GERADOR — que passaria no passo 1, porque lá os dois
+      #    lados vêm do mesmo código errado.
+      - name: Script sobrevive ao round-trip pelo YAML
+        run: python3 scripts/verifica_embed.py
+
+      - name: Sintaxe dos scripts
+        run: |
+          for f in scripts/*.sh; do bash -n "$f" && echo "ok $f"; done
