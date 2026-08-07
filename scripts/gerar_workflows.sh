@@ -20,17 +20,23 @@ cd "$(dirname "$0")/.."
 CHECK=0
 [[ "${1:-}" == "--check" ]] && CHECK=1
 
-# Indenta o script para caber dentro do bloco `run:` do YAML (10 espaços) e
-# neutraliza a única sequência que o GitHub Actions interpolaria: `${{`.
-# Nenhum dos dois scripts usa `${{` em bash — a substituição é defensiva e o
-# `--check` do CI acusa se algum dia passar a usar.
+# Embute o script COMPRIMIDO em base64, não em texto puro.
+#
+# POR QUE COMPRIMIR — não é micro-otimização, é limite duro da plataforma:
+# o GitHub Actions recusa o workflow com "Exceeded max expression length 21000"
+# quando um bloco `run:` passa de 21.000 caracteres. O
+# `ligar_ec2_nos_loadbalancers.sh` tem 21.314 bytes e estourava por 314. Medido
+# em 07/08/2026 com um dispatch real, que falhou no parse antes de rodar.
+#
+# gzip+base64 leva os dois scripts para ~7-8 KB, com folga de ~3x. Também deixa de
+# importar se `${{` aparecer no bash algum dia: dentro do base64 não há o que
+# interpolar. O `.sh` continua legível no repo — é dele que o CI extrai a verdade.
+#
+# `-n` (sem nome/timestamp) é OBRIGATÓRIO: sem ele o gzip embute a hora e a saída
+# muda a cada execução, e o `--check` do CI reprovaria sempre.
 embutir() {
   local arquivo=$1
-  if grep -q '\${{' "$arquivo"; then
-    echo "ERRO: $arquivo contém \${{ — o GitHub Actions interpolaria isso." >&2
-    exit 1
-  fi
-  sed 's/^/          /' "$arquivo"
+  gzip -9n -c "$arquivo" | base64 -w 100 | sed 's/^/          /'
 }
 
 gerar() {
@@ -126,13 +132,17 @@ jobs:
           GA_NLB_NAME: ${nlb_expr}
         run: |
           mkdir -p /tmp/ga
-          cat > /tmp/ga/script.sh <<'GA_SCRIPT_EOF'
+          # base64 do gzip do script — ver comentario em scripts/gerar_workflows.sh
+          # sobre o teto de 21000 caracteres por bloco \`run:\` do GitHub Actions.
+          cat > /tmp/ga/script.sh.gz.b64 <<'GA_SCRIPT_EOF'
 YAML
 
     embutir "scripts/${script}"
 
     cat <<YAML
           GA_SCRIPT_EOF
+          base64 -d /tmp/ga/script.sh.gz.b64 | gunzip > /tmp/ga/script.sh
+          bash -n /tmp/ga/script.sh   # falha aqui e nao na EC2 se o embed corromper
           # Um argumento por linha — preserva espaços (ex: "npm run run_docker_image")
           # sem depender de quoting sobrevivendo até o SSM.
           cat > /tmp/ga/args <<'GA_ARGS_EOF'

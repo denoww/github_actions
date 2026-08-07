@@ -89,519 +89,83 @@ jobs:
           GA_NLB_NAME: ${{ inputs.nlb_name }}
         run: |
           mkdir -p /tmp/ga
-          cat > /tmp/ga/script.sh <<'GA_SCRIPT_EOF'
-          #!/usr/bin/env bash
-          # ec2_to_loadbalancers.sh
-          #
-          # PROVENIÊNCIA — cópia fiel do gist público `denoww/5044b8da36f85afabb920263925684e9`
-          #   revisão de origem : 2c3a995b9988640bab0cfd1a6021f94ac82e105d (2025-09-18)
-          #   sha256 do original: a1f01283f75551a768c11e251fa62a83ad511c1a37df533fbad218b551fcab45
-          #   baixado em        : 2026-08-07
-          #
-          # Este arquivo é a FONTE DA VERDADE a partir de agora. O gist é espelho legado.
-          #
-          # ⚠️ ESTE É O SCRIPT DE MAIOR ALCANCE DO PARQUE. Roda como root, via SSM, e mexe nos
-          # listeners e target groups do ALB `seucondominio-web` — que é o MESMO ALB que serve o
-          # ERP inteiro. Os 5 repos (portaria, sc_linker, scsip, socket-server, midia_indoor_player)
-          # apontam para ele. Portaria ainda mexe no NLB `portaria-network`.
-          # Consequência: quem controlasse a fonte deste script poderia repontar o listener 443
-          # do ERP. Ver PSC-48 em `seguranca_sc`.
-          #
-          # Ao alterar: mude AQUI, abra PR, e só então republique o gist e bump o SHA pinado nos
-          # workflows `13_prod_ligar_load_balance.yml` dos 5 repos. Nunca edite o gist direto.
-          
-          set -euo pipefail
-          
-          ##################################
-          # portaria
-          ##################################
-          # curl -fsSL https://gist.githubusercontent.com/denoww/5044b8da36f85afabb920263925684e9/raw | bash -s -- --tags "projetos=portaria" --instance-id  i-0cf13c52cbcf250f8 --alb-name portaria-production-mtls --nlb-name portaria-network --ports "tcp:443:tcp:4443,tcp:80:tcp:3001,tcp:3001:tcp:3001,tcp:9000:tcp:9000,tcp:9001:tcp:9001,tcp:9005:tcp:9005,http:80:http:3001,https:443:https:4443" --tcp-healthy-threshold 3 --tcp-unhealthy-threshold 3 --region us-east-1 --vpc-id vpc-0232f866 --certificado-https-arn arn:aws:acm:us-east-1:516862767124:certificate/99570c7a-1fb8-4e70-b340-637f7bcaa535
-          ##################################
-          
-          
-          ##################################
-          # socket-server-seucondominio
-          ##################################
-          # curl -fsSL https://gist.githubusercontent.com/denoww/5044b8da36f85afabb920263925684e9/raw | bash -s -- --tags "projetos=socket-server-seucondominio" --instance-id  i-03a300eaa053f038a --alb-name socket-server-seucondominio --ports "http:80:http:5200,https:443:http:5200" --tcp-healthy-threshold 3 --tcp-unhealthy-threshold 3 --region us-east-1 --vpc-id vpc-0232f866 --certificado-https-arn arn:aws:acm:us-east-1:516862767124:certificate/99570c7a-1fb8-4e70-b340-637f7bcaa535
-          ##################################
-          
-          ##################################
-          # erp_staging
-          ##################################
-          # curl -fsSL https://gist.githubusercontent.com/denoww/5044b8da36f85afabb920263925684e9/raw | bash -s -- --tags "projetos=erp_staging" --instance-id  i-01bc4ddc867b24b71 --alb-name seucondominio-web --ports "https:5050:http:5050" --tcp-healthy-threshold 3 --tcp-unhealthy-threshold 3 --region us-east-1 --vpc-id vpc-0232f866 --certificado-https-arn arn:aws:acm:us-east-1:516862767124:certificate/99570c7a-1fb8-4e70-b340-637f7bcaa535
-          ##################################
-          
-          
-          #############################################################
-          # EXEMPLO NETWORK LOADBALANCE:
-          #############################################################
-          # curl -fsSL https://gist.githubusercontent.com/denoww/5044b8da36f85afabb920263925684e9/raw | bash -s -- --tags "projetos=portaria" --alb-name teste-alb --nlb-name teste-nlb --ports "tcp:443:tcp:443,tcp:80:tcp:3001,tcp:3001:tcp:3001,tcp:9000:tcp:9000,tcp:9001:tcp:9001,tcp:9005:tcp:9005,https:443:https:4443,http:80:http:3001" --tcp-healthy-threshold 3 --tcp-unhealthy-threshold 3 --region us-east-1 --certificado-https-arn arn:aws:acm:us-east-1:516862767124:certificate/99570c7a-1fb8-4e70-b340-637f7bcaa535
-          # ou
-          # bash ec2_to_loadbalancers.sh --tags "projetos=portaria" --alb-name teste-alb --nlb-name teste-nlb --ports "tcp:443:tcp:4443,tcp:80:tcp:3001,tcp:3001:tcp:3001,tcp:9000:tcp:9000,tcp:9001:tcp:9001,tcp:9005:tcp:9005,https:443:https:4443,http:80:http:3001" --tcp-healthy-threshold 3 --tcp-unhealthy-threshold 3 --region us-east-1 --certificado-https-arn arn:aws:acm:us-east-1:516862767124:certificate/99570c7a-1fb8-4e70-b340-637f7bcaa535
-          #############################################################
-          # EXEMPLO APLICATION LOADBALANCE:
-          #############################################################
-          # bash ec2_to_loadbalancers.sh \
-          #   --region us-east-1 \
-          #   --alb-name meu_aplication_loadbalance \
-          #   --ports "http:80:http:3000,https:443:https:443" \
-          #   --certificado-https-arn arn:aws:acm:us-east-1:123456789012:certificate/abcd-efgh-...
-          #############################################################
-          # EXEMPLO NETWORK LB:
-          #############################################################
-          # bash ec2_to_loadbalancers.sh \
-          #   --tags "projetos=xxxxx"
-          #   --region us-east-1 \
-          #   --nlb-name meu_network_loadbalance \
-          #   --ports "tcp:9000:tcp:9000,tcp:9001:tcp:9001" \
-          #   --certificado-https-arn arn:aws:acm:us-east-1:123456789012:certificate/abcd-efgh-...
-          
-          
-          
-          
-          
-          
-          # Uso:
-          # bash ec2_to_loadbalancers.sh \
-          #   --region us-east-1 \
-          #   --vpc-id vpc-0123456789abcdef0 \            # opcional; descobre via IMDS se não passar
-          #   --instance-id i-0123456789abcdef0 \         # opcional; descobre via IMDS se não passar
-          #   --alb-name meu_aplication_loadbalance \                        # ou --alb-arn arn:aws:elasticloadbalancing:...
-          #   --nlb-name meu_network_loadbalance \                        # ou --nlb-arn ...
-          #   --ports "http:80,https:443:http:3001,tcp:80:tcp:3001,tcp:3001:tcp,tcp:9000:tcp:9000"
-          #
-          # OBS sobre --ports:
-          #   - proto:port                     -> listener_port = target_port = port
-          #   - proto:listener_port:target_port -> listener_port e target_port distintos
-          #     Exemplos: tcp:80:3001 | https:443:http:3001 | http:8080:3000
-          #
-          # HTTPS:
-          #   --certificado-https-arn arn:aws:acm:...                  # obrigatório se usar 'https:' em --ports
-          #
-          # Health checks HTTP/HTTPS (ALB):
-          #   --health-path "/health" --matcher "200-399" --health-interval 15 --health-timeout 5 \
-          #   --healthy-threshold 2 --unhealthy-threshold 2
-          #
-          # Health checks TCP (NLB):
-          #   (usa TCP padrão; opcionalmente --tcp-healthy-threshold/--tcp-unhealthy-threshold)
-          
-          
-          
-          STEP=0
-          log()  { printf '[%(%H:%M:%S)T] %s\n' -1 "$*" >&2; }
-          step() { STEP=$((STEP+1)); log "[$STEP] $*"; }
-          
-          # AWS CLI: sem pager
-          export AWS_PAGER=""
-          AWS_OPTS_BASE=(--no-cli-pager)
-          
-          
-          REGION="us-east-1"
-          VPC_ID=""
-          INSTANCE_ID=""
-          ALB_NAME=""
-          ALB_ARN=""
-          NLB_NAME=""
-          NLB_ARN=""
-          PORTS_SPEC=""
-          
-          CERT_ARN=""
-          
-          HEALTH_PATH="/health"
-          MATCHER="200-399"
-          HEALTH_INTERVAL=45
-          HEALTH_TIMEOUT=5
-          HEALTHY_THRESHOLD=2
-          UNHEALTHY_THRESHOLD=2
-          
-          TCP_HEALTHY_THRESHOLD=3
-          TCP_UNHEALTHY_THRESHOLD=3
-          
-          TAGS_SPEC=""
-          
-          
-          # --------- Args ----------
-          while [[ $# -gt 0 ]]; do
-            case "$1" in
-              --region) REGION="$2"; shift 2;;
-              --vpc-id) VPC_ID="$2"; shift 2;;
-              --instance-id) INSTANCE_ID="$2"; shift 2;;
-              --alb-name) ALB_NAME="$2"; shift 2;;
-              --alb-arn) ALB_ARN="$2"; shift 2;;
-              --nlb-name) NLB_NAME="$2"; shift 2;;
-              --nlb-arn) NLB_ARN="$2"; shift 2;;
-              --ports) PORTS_SPEC="$2"; shift 2;;
-              --certificado-https-arn) CERT_ARN="$2"; shift 2;;
-              --health-path) HEALTH_PATH="$2"; shift 2;;
-              --matcher) MATCHER="$2"; shift 2;;
-              --health-interval) HEALTH_INTERVAL="$2"; shift 2;;
-              --health-timeout) HEALTH_TIMEOUT="$2"; shift 2;;
-              --healthy-threshold) HEALTHY_THRESHOLD="$2"; shift 2;;
-              --unhealthy-threshold) UNHEALTHY_THRESHOLD="$2"; shift 2;;
-              --tcp-healthy-threshold) TCP_HEALTHY_THRESHOLD="$2"; shift 2;;
-              --tcp-unhealthy-threshold) TCP_UNHEALTHY_THRESHOLD="$2"; shift 2;;
-              --tags) TAGS_SPEC="$2"; shift 2;;
-              *) echo "Arg inválido: $1"; exit 1;;
-            esac
-          done
-          
-          [[ -z "$PORTS_SPEC" ]] && { echo "ERRO: passe --ports"; exit 1; }
-          
-          AWS_OPTS=("${AWS_OPTS_BASE[@]}" --region "$REGION")
-          
-          need() { command -v "$1" >/dev/null 2>&1 || { echo "Falta $1"; exit 1; }; }
-          need aws; need jq; need curl
-          
-          # --------- IMDSv2 (se necessário) ----------
-          # --------- IMDSv2 (com timeout + feedback) ----------
-          imds_token() { curl -fsS --connect-timeout 1 --max-time 2 -X PUT \
-            "http://169.254.169.254/latest/api/token" \
-            -H "X-aws-ec2-metadata-token-ttl-seconds: 60"; }
-          imds_get() { curl -fsS --connect-timeout 1 --max-time 2 \
-            -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
-            "http://169.254.169.254/latest/meta-data/$1"; }
-          
-          step "Resolvendo INSTANCE_ID e VPC_ID (IMDS ou parâmetros)"
-          IMDS_TOKEN="$(imds_token || true)"
-          if [[ -z "$INSTANCE_ID" ]]; then
-            if [[ -n "$IMDS_TOKEN" ]]; then
-              INSTANCE_ID="$(imds_get instance-id || true)"
-            fi
-          fi
-          if [[ -z "$VPC_ID" ]]; then
-            if [[ -n "$IMDS_TOKEN" ]]; then
-              MAC="$(imds_get network/interfaces/macs/ | head -n1 | tr -d '/' || true)"
-              [[ -n "$MAC" ]] && VPC_ID="$(imds_get "network/interfaces/macs/${MAC}/vpc-id" || true)"
-            fi
-          fi
-          [[ -z "$INSTANCE_ID" ]] && { echo "ERRO: não consegui obter INSTANCE_ID (passe --instance-id)"; exit 1; }
-          [[ -z "$VPC_ID"     ]] && { echo "ERRO: não consegui obter VPC_ID (passe --vpc-id)"; exit 1; }
-          log "INSTANCE_ID=$INSTANCE_ID  VPC_ID=$VPC_ID"
-          
-          
-          # --------- Resolve ALB/NLB ARN ----------
-          step "Resolvendo ARNs/Nomes dos Load Balancers"
-          
-          if [[ -z "$ALB_ARN" && -n "$ALB_NAME" ]]; then
-            ALB_ARN="$(aws elbv2 describe-load-balancers "${AWS_OPTS[@]}" --names "$ALB_NAME" \
-              | jq -r '.LoadBalancers[0].LoadBalancerArn')"
-          fi
-          if [[ -z "$NLB_ARN" && -n "$NLB_NAME" ]]; then
-            NLB_ARN="$(aws elbv2 describe-load-balancers "${AWS_OPTS[@]}" --names "$NLB_NAME" \
-              | jq -r '.LoadBalancers[0].LoadBalancerArn')"
-          fi
-          
-          # Descobre o "LoadBalancerName" a partir do ARN, se necessário
-          if [[ -n "$ALB_ARN" && -z "$ALB_NAME" ]]; then
-            ALB_NAME="$(aws elbv2 describe-load-balancers "${AWS_OPTS[@]}" --load-balancer-arns "$ALB_ARN" \
-              | jq -r '.LoadBalancers[0].LoadBalancerName')"
-          fi
-          if [[ -n "$NLB_ARN" && -z "$NLB_NAME" ]]; then
-            NLB_NAME="$(aws elbv2 describe-load-balancers "${AWS_OPTS[@]}" --load-balancer-arns "$NLB_ARN" \
-              | jq -r '.LoadBalancers[0].LoadBalancerName')"
-          fi
-          
-          build_aws_tags_args() {
-            local spec="$1"
-            [[ -z "$spec" ]] && return 0
-            local -a out=()
-            IFS=',' read -r -a kvs <<< "$spec"
-            for kv in "${kvs[@]}"; do
-              kv="$(echo "$kv" | xargs)"
-              [[ -z "$kv" ]] && continue
-              k="${kv%%=*}"
-              v="${kv#*=}"
-              [[ -z "$k" ]] && continue
-              out+=("Key=$k,Value=$v")
-            done
-            printf '%s ' "${out[@]}"
-          }
-          
-          AWS_TAGS_ARGS="$(build_aws_tags_args "$TAGS_SPEC")"
-          
-          get_tag_value() {
-            local spec="$1" key="$2"
-            IFS=',' read -r -a kvs <<< "$spec"
-            for kv in "${kvs[@]}"; do
-              kv="$(echo "$kv" | xargs)"
-              [[ -z "$kv" ]] && continue
-              local k="${kv%%=*}"
-              local v="${kv#*=}"
-              if [[ "$k" == "$key" && -n "$v" ]]; then
-                printf '%s' "$v"
-                return 0
-              fi
-            done
-            return 1
-          }
-          
-          # Pega o primeiro valor de tag, útil como fallback
-          get_first_tag_value() {
-            local spec="$1"
-            IFS=',' read -r -a kvs <<< "$spec"
-            for kv in "${kvs[@]}"; do
-              kv="$(echo "$kv" | xargs)"
-              [[ -z "$kv" ]] && continue
-              local v="${kv#*=}"
-              [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
-            done
-            return 1
-          }
-          
-          
-          # Helper para montar nome do TG com limite de 32 chars
-          build_tg_name() {
-            local prefix="$1" proto="$2" port="$3"
-            local proto_lc="$(echo "$proto" | tr '[:upper:]' '[:lower:]')"
-            local name="tg-${prefix}-${proto_lc}-${port}"
-            local max=32
-            if ((${#name} > max)); then
-              local over=$((${#name} - max))
-              local prelen=${#prefix}
-              if (( prelen > over )); then
-                prefix="${prefix:0:$((prelen - over))}"
-              else
-                prefix="${prefix:0:1}"
-              fi
-              name="tg-${prefix}-${proto_lc}-${port}"
-            fi
-            printf '%s' "$name"
-          }
-          sanitize_name() {
-            # troca chars inválidos por '-', colapsa '-', remove '-' nas pontas
-            local s="$1"
-            s="$(echo -n "$s" | tr '[:upper:]' '[:lower:]')"          # se quiser manter case, remova esta linha
-            s="$(echo -n "$s" | sed -E 's/[^A-Za-z0-9-]+/-/g; s/-+/-/g; s/^-+//; s/-+$//')"
-            printf '%s' "$s"
-          }
-          
-          # Prefixos: para HTTP/HTTPS use o nome do ALB; para TCP use o nome do NLB
-          RAW_TAG_PREFIX="$(get_tag_value "$TAGS_SPEC" "projetos" || true)"
-          if [[ -n "$RAW_TAG_PREFIX" ]]; then
-            TAG_PREFIX="$(sanitize_name "$RAW_TAG_PREFIX")"
-          fi
-          
-          ALB_PREFIX_FALLBACK="$(sanitize_name "${ALB_NAME:-alb}")"
-          NLB_PREFIX_FALLBACK="$(sanitize_name "${NLB_NAME:-nlb}")"
-          
-          TG_PREFIX_HTTP="${TAG_PREFIX:-$ALB_PREFIX_FALLBACK}"
-          TG_PREFIX_TCP="${TAG_PREFIX:-$NLB_PREFIX_FALLBACK}"
-          
-          # --------- Helpers ----------
-          ensure_tg_alb_http() {
-            local target_port="$1" proto="$2"   # proto = HTTP|HTTPS (target)
-            local tg_name; tg_name="$(build_tg_name "${TG_PREFIX_HTTP}" "$proto" "$target_port")"
-          
-            local tg_arn
-            log "TG ${tg_name} → garantindo (ALB/$proto port=$target_port)"
-            tg_arn="$(aws elbv2 describe-target-groups "${AWS_OPTS[@]}" --names "$tg_name" 2>/dev/null \
-              | jq -r '.TargetGroups[0].TargetGroupArn' || true)"
-          
-            if [[ -z "$tg_arn" || "$tg_arn" == "null" ]]; then
-              tg_arn="$(aws elbv2 create-target-group "${AWS_OPTS[@]}" \
-                --name "$tg_name" \
-                --protocol "$proto" \
-                --port "$target_port" \
-                --vpc-id "$VPC_ID" \
-                --target-type instance \
-                --health-check-protocol "$proto" \
-                --health-check-path "$HEALTH_PATH" \
-                --health-check-interval-seconds "$HEALTH_INTERVAL" \
-                --health-check-timeout-seconds "$HEALTH_TIMEOUT" \
-                --healthy-threshold-count "$HEALTHY_THRESHOLD" \
-                --unhealthy-threshold-count "$UNHEALTHY_THRESHOLD" \
-                --matcher "HttpCode=$MATCHER" \
-                | jq -r '.TargetGroups[0].TargetGroupArn')"
-              echo "Criado TG (ALB/$proto) $tg_name" >&2
-              [[ -n "$AWS_TAGS_ARGS" ]] && aws elbv2 add-tags "${AWS_OPTS[@]}" --resource-arns "$tg_arn" --tags $AWS_TAGS_ARGS >/dev/null
-            else
-              aws elbv2 modify-target-group "${AWS_OPTS[@]}" \
-                --target-group-arn "$tg_arn" \
-                --health-check-protocol "$proto" \
-                --health-check-path "$HEALTH_PATH" \
-                --health-check-interval-seconds "$HEALTH_INTERVAL" \
-                --health-check-timeout-seconds "$HEALTH_TIMEOUT" \
-                --healthy-threshold-count "$HEALTHY_THRESHOLD" \
-                --unhealthy-threshold-count "$UNHEALTHY_THRESHOLD" \
-                --matcher "HttpCode=$MATCHER" >/dev/null
-              echo "TG (ALB/$proto) $tg_name já existia; atualizado." >&2
-            fi
-          
-            aws elbv2 register-targets "${AWS_OPTS[@]}" \
-              --target-group-arn "$tg_arn" \
-              --targets "Id=$INSTANCE_ID,Port=$target_port" >/dev/null
-          
-            printf '%s\n' "$tg_arn"
-          }
-          
-          ensure_listener_alb_http() {
-            local listener_port="$1" proto_listener="$2" tg_arn="$3"  # proto_listener = HTTP|HTTPS
-            [[ -z "$ALB_ARN" ]] && { echo "ERRO: ALB não informado"; exit 1; }
-          
-            local listener_arn
-            listener_arn="$(aws elbv2 describe-listeners "${AWS_OPTS[@]}" --load-balancer-arn "$ALB_ARN" \
-              | jq -r --arg p "$listener_port" '.Listeners[] | select(.Port == ($p|tonumber)) | .ListenerArn')"
-          
-            if [[ -z "$listener_arn" || "$listener_arn" == "null" ]]; then
-              if [[ "$proto_listener" == "HTTPS" ]]; then
-                [[ -z "$CERT_ARN" ]] && { echo "ERRO: --certificado-https-arn obrigatório para HTTPS:$listener_port"; exit 1; }
-                listener_arn="$(aws elbv2 create-listener "${AWS_OPTS[@]}" \
-                  --load-balancer-arn "$ALB_ARN" \
-                  --protocol HTTPS \
-                  --port "$listener_port" \
-                  --certificates "CertificateArn=$CERT_ARN" \
-                  --default-actions "Type=forward,TargetGroupArn=$tg_arn" \
-                  | jq -r '.Listeners[0].ListenerArn')"
-              else
-                listener_arn="$(aws elbv2 create-listener "${AWS_OPTS[@]}" \
-                  --load-balancer-arn "$ALB_ARN" \
-                  --protocol HTTP \
-                  --port "$listener_port" \
-                  --default-actions "Type=forward,TargetGroupArn=$tg_arn" \
-                  | jq -r '.Listeners[0].ListenerArn')"
-              fi
-              echo "Criado listener ALB $proto_listener:$listener_port"
-              [[ -n "$AWS_TAGS_ARGS" ]] && aws elbv2 add-tags "${AWS_OPTS[@]}" --resource-arns "$listener_arn" --tags $AWS_TAGS_ARGS >/dev/null
-            else
-              aws elbv2 modify-listener "${AWS_OPTS[@]}" \
-                --listener-arn "$listener_arn" \
-                --default-actions "Type=forward,TargetGroupArn=$tg_arn" >/dev/null
-              echo "Listener ALB $proto_listener:$listener_port já existia; default action atualizada."
-            fi
-          }
-          
-          ensure_tg_nlb() {
-            local proto_target="$1" target_port="$2"   # proto_target = TCP|TLS
-            local proto_lc="$(echo "$proto_target" | tr '[:upper:]' '[:lower:]')"
-            local tg_name; tg_name="$(build_tg_name "${TG_PREFIX_TCP}" "$proto_lc" "$target_port")"
-            local tg_arn
-          
-            tg_arn="$(aws elbv2 describe-target-groups "${AWS_OPTS[@]}" --names "$tg_name" 2>/dev/null \
-              | jq -r '.TargetGroups[0].TargetGroupArn' || true)"
-          
-            if [[ -z "$tg_arn" || "$tg_arn" == "null" ]]; then
-              tg_arn="$(aws elbv2 create-target-group "${AWS_OPTS[@]}" \
-                --name "$tg_name" \
-                --protocol "$proto_target" \
-                --port "$target_port" \
-                --vpc-id "$VPC_ID" \
-                --target-type instance \
-                --healthy-threshold-count "$TCP_HEALTHY_THRESHOLD" \
-                --unhealthy-threshold-count "$TCP_UNHEALTHY_THRESHOLD" \
-                | jq -r '.TargetGroups[0].TargetGroupArn')"
-              echo "Criado TG (NLB/$proto_target) $tg_name" >&2
-              [[ -n "$AWS_TAGS_ARGS" ]] && aws elbv2 add-tags "${AWS_OPTS[@]}" --resource-arns "$tg_arn" --tags $AWS_TAGS_ARGS >/dev/null
-            else
-              aws elbv2 modify-target-group "${AWS_OPTS[@]}" \
-                --target-group-arn "$tg_arn" \
-                --healthy-threshold-count "$TCP_HEALTHY_THRESHOLD" \
-                --unhealthy-threshold-count "$TCP_UNHEALTHY_THRESHOLD" >/dev/null
-              echo "TG (NLB/$proto_target) $tg_name já existia; atualizado." >&2
-            fi
-          
-            log "TG ${tg_name} → registrando alvo Id=$INSTANCE_ID,Port=$target_port"
-            aws elbv2 register-targets "${AWS_OPTS[@]}" \
-              --target-group-arn "$tg_arn" \
-              --targets "Id=$INSTANCE_ID,Port=$target_port" >/dev/null
-          
-            printf '%s\n' "$tg_arn"
-          }
-          
-          ensure_listener_nlb() {
-            local proto_listener="$1" listener_port="$2" tg_arn="$3"   # proto_listener = TCP|TLS
-            [[ -z "$NLB_ARN" ]] && { echo "ERRO: NLB não informado"; exit 1; }
-          
-            local listener_arn
-            listener_arn="$(aws elbv2 describe-listeners "${AWS_OPTS[@]}" --load-balancer-arn "$NLB_ARN" \
-              | jq -r --arg p "$listener_port" '.Listeners[] | select(.Port == ($p|tonumber)) | .ListenerArn')"
-          
-            if [[ -z "$listener_arn" || "$listener_arn" == "null" ]]; then
-              if [[ "$proto_listener" == "TLS" ]]; then
-                [[ -z "$CERT_ARN" ]] && { echo "ERRO: --certificado-https-arn obrigatório para TLS:$listener_port no NLB"; exit 1; }
-                listener_arn="$(aws elbv2 create-listener "${AWS_OPTS[@]}" \
-                  --load-balancer-arn "$NLB_ARN" \
-                  --protocol TLS \
-                  --port "$listener_port" \
-                  --certificates "CertificateArn=$CERT_ARN" \
-                  --default-actions "Type=forward,TargetGroupArn=$tg_arn" \
-                  | jq -r '.Listeners[0].ListenerArn')"
-              else
-                listener_arn="$(aws elbv2 create-listener "${AWS_OPTS[@]}" \
-                  --load-balancer-arn "$NLB_ARN" \
-                  --protocol TCP \
-                  --port "$listener_port" \
-                  --default-actions "Type=forward,TargetGroupArn=$tg_arn" \
-                  | jq -r '.Listeners[0].ListenerArn')"
-              fi
-              echo "Criado listener NLB $proto_listener:$listener_port"
-              [[ -n "$AWS_TAGS_ARGS" ]] && aws elbv2 add-tags "${AWS_OPTS[@]}" --resource-arns "$listener_arn" --tags $AWS_TAGS_ARGS >/dev/null
-            else
-              aws elbv2 modify-listener "${AWS_OPTS[@]}" \
-                --listener-arn "$listener_arn" \
-                --default-actions "Type=forward,TargetGroupArn=$tg_arn" >/dev/null
-              echo "Listener NLB $proto_listener:$listener_port já existia; default action atualizada."
-            fi
-          }
-          
-          
-          # --------- Processa PORTS_SPEC ----------
-          # --------- Processa PORTS_SPEC ----------
-          IFS=',' read -r -a ITEMS <<< "$PORTS_SPEC"
-          for raw in "${ITEMS[@]}"; do
-            item="$(echo "$raw" | xargs)"   # trim
-            [[ -z "$item" ]] && continue
-          
-            IFS=':' read -r proto_listener listener_port proto_target target_port <<< "$item"
-          
-            # valida formato: sempre 4 campos
-            if [[ -z "$proto_listener" || -z "$listener_port" || -z "$proto_target" || -z "$target_port" ]]; then
-              echo "Entrada inválida '$item' (esperado proto_listener:listener_port:proto_target:target_port)"; exit 1
-            fi
-          
-            # normaliza
-            proto_listener="$(echo "$proto_listener" | tr '[:upper:]' '[:lower:]')"
-            proto_target="$(echo "$proto_target"   | tr '[:upper:]' '[:lower:]')"
-          
-            # valida portas
-            [[ ! "$listener_port" =~ ^[0-9]+$ || ! "$target_port" =~ ^[0-9]+$ ]] && { echo "Portas inválidas em '$item'"; exit 1; }
-          
-            # mapeia para enums da AWS
-            case "$proto_listener" in
-              http)  L_PROTO="HTTP" ;;
-              https) L_PROTO="HTTPS" ;;
-              tcp)   L_PROTO="TCP" ;;
-              tls)   L_PROTO="TLS" ;;
-              *) echo "Protocolo listener inválido em '$item'"; exit 1;;
-            esac
-          
-            case "$proto_target" in
-              http)  T_PROTO="HTTP" ;;
-              https) T_PROTO="HTTPS" ;;
-              tcp)   T_PROTO="TCP" ;;
-              tls)   T_PROTO="TLS" ;;
-              *) echo "Protocolo target inválido em '$item'"; exit 1;;
-            esac
-          
-            if [[ "$L_PROTO" == "HTTP" || "$L_PROTO" == "HTTPS" ]]; then
-              # ALB: targets devem ser HTTP/HTTPS
-              if [[ "$T_PROTO" != "HTTP" && "$T_PROTO" != "HTTPS" ]]; then
-                echo "ALB não suporta target $T_PROTO em '$item' (use HTTP/HTTPS)"; exit 1
-              fi
-              tg_arn="$(ensure_tg_alb_http "$target_port" "$T_PROTO")"
-              ensure_listener_alb_http "$listener_port" "$L_PROTO" "$tg_arn"
-            else
-              # NLB: listeners TCP/TLS; targets TCP/TLS
-              if [[ "$T_PROTO" != "TCP" && "$T_PROTO" != "TLS" ]]; then
-                echo "NLB exige target TCP/TLS em '$item'"; exit 1
-              fi
-              tg_arn="$(ensure_tg_nlb "$T_PROTO" "$target_port")"
-              ensure_listener_nlb "$L_PROTO" "$listener_port" "$tg_arn"
-            fi
-          done
-          
-          
-          echo "OK: ALB/NLB garantidos para: $PORTS_SPEC"
+          # base64 do gzip do script — ver comentario em scripts/gerar_workflows.sh
+          # sobre o teto de 21000 caracteres por bloco `run:` do GitHub Actions.
+          cat > /tmp/ga/script.sh.gz.b64 <<'GA_SCRIPT_EOF'
+          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
+          v4W9Lu5CUwAA
           GA_SCRIPT_EOF
+          base64 -d /tmp/ga/script.sh.gz.b64 | gunzip > /tmp/ga/script.sh
+          bash -n /tmp/ga/script.sh   # falha aqui e nao na EC2 se o embed corromper
           # Um argumento por linha — preserva espaços (ex: "npm run run_docker_image")
           # sem depender de quoting sobrevivendo até o SSM.
           cat > /tmp/ga/args <<'GA_ARGS_EOF'
