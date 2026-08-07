@@ -106,408 +106,93 @@ jobs:
           GA_NLB_NAME: ''
         run: |
           mkdir -p /tmp/ga
-          cat > /tmp/ga/script.sh <<'GA_SCRIPT_EOF'
-          #!/usr/bin/env bash
-          # docker_exec_ecr.sh
-          #
-          # PROVENIÊNCIA — cópia fiel do gist público `denoww/4ed3acb2d942da7fc9c70adb5406c44d`
-          #   revisão de origem : f5fd15fdb7c72115b621ed8d0f1672e2e92e6561 (2026-05-07)
-          #   sha256 do original: 933ea499af56c6b61906c36f1a2e79502ae04cef3dd3bbed7b617acea4f8b051
-          #   baixado em        : 2026-08-07
-          #
-          # Este arquivo é a FONTE DA VERDADE a partir de agora. O gist é espelho legado.
-          # Roda via `curl | sudo bash` como root em TODA EC2 com tag `projetos` — portaria,
-          # sc_linker, scsip, socket-server. Sem review, sem pinning e sem verificação de
-          # integridade: quem editasse o gist tinha root nas quatro máquinas no deploy seguinte.
-          # Ver PSC-48 em `seguranca_sc`.
-          #
-          # Ao alterar: mude AQUI, abra PR, e só então republique o gist e bump o SHA pinado nos
-          # workflows `12_prod_restart_server.yml` dos 5 repos. Nunca edite o gist direto.
-          
-          set -euo pipefail
-          
-          ######################################
-          # Uso (exemplos):
-          # curl -fsSL https://gist.githubusercontent.com/denoww/4ed3acb2d942da7fc9c70adb5406c44d/raw \
-          #   | sudo -E env HOME="$HOME" bash -s -- portaria "3001,9000,9001,9005" "npm run run_docker_image" production
-          #
-          # Desligar:
-          # sudo sh -c 'docker update --restart=no portaria && docker stop portaria'
-          ######################################
-          
-          
-          ######################################
-          # erp_web staging
-          # curl -fsSL https://gist.githubusercontent.com/denoww/4ed3acb2d942da7fc9c70adb5406c44d/raw \
-          #   | sudo -E env HOME="$HOME" bash -s -- erp_staging "5050" "bash -lc './.scripts/web-server.sh'" staging "/erp" "erp_stag_web" "erp"
-          #
-          # Desligar:
-          # sudo sh -c 'docker update --restart=no erp_stag_web && docker stop erp_stag_web'
-          ######################################
-          
-          
-          ### ====== CONFIG PADRÃO ======
-          REGION="us-east-1"
-          ACCOUNT_ID="516862767124"
-          
-          ECR_REPO_NAME="${1}"                    # 1º arg: repositório ECR
-          DOCKER_PORTS="${2}"                   # 2º arg: "3010,9000,..." ou "3010:3010,9000:9000"
-          DOCKER_CMD="${3}"                   # 3º arg: comando dentro do container
-          ENV_NAME="${4:-production}"     # 4º arg: development|production
-          WORKDIR_ON_IMAGE="${5:-/src}"      # 5 /src ou /erp
-          CONTAINER_NAME="${6:-$ECR_REPO_NAME}" # 6 CONTAINER_NAME
-          NOME_PASTA_NO_S3="${7:-$ECR_REPO_NAME}" # 6 NOME_PASTA_NO_S3
-          
-          IMAGE_TAG="latest"
-          
-          # Tuning (pode sobrescrever com env)
-          NOFILE_LIMIT="${NOFILE_LIMIT:-1048576}"
-          UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-16}"
-          NODE_OPTIONS="${NODE_OPTIONS:-"--max-old-space-size=1024"}"
-          
-          # Caminhos remotos (production)
-          PASTA_S3_PATH="s3://sc-environments/${NOME_PASTA_NO_S3}"   # tudo aqui será copiado para ${WORKDIR_ON_IMAGE}
-          ### ===========================
-          
-          # Limite de logs do Docker (pode sobrescrever via env)
-          LOG_DRIVER="${LOG_DRIVER:-json-file}"
-          LOG_MAX_SIZE="${LOG_MAX_SIZE:-10m}"
-          LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
-          
-          
-          # Preserva HOME real quando usando sudo
-          if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
-            export HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-          fi
-          
-          REGION="${AWS_DEFAULT_REGION:-$REGION}"
-          
-          AWS_OPTS=()
-          [[ -n "${AWS_PROFILE:-}" ]] && AWS_OPTS+=(--profile "$AWS_PROFILE")
-          AWS_OPTS+=(--region "$REGION")
-          
-          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}"
-          
-          ensure_sysctl_host() {
-            # Aplica tunings no host (beneficia host network e geralmente o bridge também)
-            local F=/etc/sysctl.d/99-socket.conf
-            sudo tee "$F" >/dev/null <<'EOF'
-          net.core.somaxconn = 4096
-          net.ipv4.tcp_max_syn_backlog = 8192
-          net.ipv4.tcp_fin_timeout = 15
-          net.ipv4.tcp_keepalive_time = 60
-          net.ipv4.tcp_keepalive_intvl = 15
-          net.ipv4.tcp_keepalive_probes = 4
-          net.core.rmem_max = 134217728
-          net.core.wmem_max = 134217728
-          net.ipv4.tcp_rmem = 4096 87380 134217728
-          net.ipv4.tcp_wmem = 4096 65536 134217728
-          EOF
-            sudo sysctl --system
-          }
-          
-          echo "[1/10] Instalando Docker + AWS CLI (se necessário)..."
-          if ! command -v docker >/dev/null 2>&1; then
-            curl -fsSL https://get.docker.com | sh
-            id -nG 2>/dev/null | grep -qw docker || usermod -aG docker "${SUDO_USER:-$USER}" || true
-          fi
-          if ! command -v aws >/dev/null 2>&1; then
-            apt-get update -y && apt-get install -y unzip
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
-            unzip -q awscliv2.zip && ./aws/install
-          fi
-          systemctl enable --now docker >/dev/null 2>&1 || true
-          
-          echo "[2/10] Validando credenciais AWS..."
-          aws "${AWS_OPTS[@]}" sts get-caller-identity >/dev/null 2>&1 || {
-            echo "ERRO: credenciais AWS inválidas ou ausentes."
-            echo " - Em EC2: Actions -> Security -> Modify IAM role → selecione 'Admin Access'"
-            echo " - Em dev: rode 'aws configure'"
-            exit 1
-          }
-          
-          echo "[3/10] Login no ECR..."
-          aws "${AWS_OPTS[@]}" ecr get-login-password \
-            | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-          
-          echo "[4/10] Pull da imagem ${IMAGE_URI}..."
-          docker pull "${IMAGE_URI}"
-          
-          # Diretório temporário para sync do S3
-          TMPDIR="$(mktemp -d)"
-          cleanup() { rm -rf "${TMPDIR}" || true; }
-          trap cleanup EXIT
-          
-          echo "[5/10] Preparando (${ENV_NAME})..."
-          USE_HOST_NETWORK=0
-          ENV_FILE=""
-          
-          case "$ENV_NAME" in
-            development|dev)
-              USE_HOST_NETWORK=0
-              echo " - [DEV] Tentando extrair /src/env_DEV da imagem para usar como --env-file..."
-              TMP_ENV_DEV="$(mktemp)"
-              if docker run --rm "${IMAGE_URI}" sh -lc 'cat /src/env_DEV 2>/dev/null || true' > "${TMP_ENV_DEV}"; then
-                if [[ -s "${TMP_ENV_DEV}" ]]; then
-                  ENV_FILE="${TMP_ENV_DEV}"
-                  echo " - [DEV] env_DEV encontrado: ${ENV_FILE}"
-                else
-                  rm -f "${TMP_ENV_DEV}"
-                  echo " - [DEV] /src/env_DEV não encontrado; seguindo sem --env-file."
-                fi
-              fi
-              ;;
-          
-            staging|production|prod)
-              USE_HOST_NETWORK=1
-          
-              # Mapeia sufixo do arquivo
-              case "$ENV_NAME" in
-                staging) SUFIXO="STAG" ;;
-                production|prod) SUFIXO="PROD" ;;
-              esac
-          
-              echo " - Sincronizando ${PASTA_S3_PATH} → ${TMPDIR}/payload ..."
-              mkdir -p "${TMPDIR}/payload"
-              # ⚠️ NÃO devolver este erro pra `|| true`. Era assim até 07/08/2026 e custou ~10 min
-              # de socket-server fora do ar: a role da EC2 tinha perdido o S3, o sync falhou, o
-              # script SEGUIU, derrubou o container bom e subiu um sem env — que entrou em crash
-              # loop tentando resolver o host `redis` (default de dev). O job ficou VERDE.
-              # Em staging/production o env é obrigatório: sem ele, aborte ANTES de tocar no
-              # container que está rodando. Deploy que falha e não mexe em nada é o desfecho bom.
-              if ! aws "${AWS_OPTS[@]}" s3 sync "${PASTA_S3_PATH}/" "${TMPDIR}/payload/" --delete --only-show-errors; then
-                echo "ERRO: falhou baixar o env de ${PASTA_S3_PATH} (permissão da role da EC2? bucket?)."
-                echo "      Abortando SEM mexer no container atual."
-                exit 1
-              fi
-          
-              # Ordem de preferência de nomes (ajuste se quiser)
-              CANDIDATOS=(
-                "env_${SUFIXO}"
-                "env_${SUFIXO}.env"
-                ".env.${ENV_NAME}"
-                ".env"
-              )
-          
-              for f in "${CANDIDATOS[@]}"; do
-                if [[ -f "${TMPDIR}/payload/$f" ]]; then
-                  ENV_FILE="${TMPDIR}/payload/$f"
-                  echo " - [${ENV_NAME^^}] Arquivo de env encontrado: ${ENV_FILE}"
-                  break
-                fi
-              done
-          
-              if [[ -z "$ENV_FILE" ]]; then
-                # Mesma lição do sync acima: em staging/production, "seguir sem --env-file" é
-                # trocar um deploy que falha por um container que sobe quebrado. Abortar.
-                echo "ERRO: nenhum arquivo de env em ${PASTA_S3_PATH} (candidatos: ${CANDIDATOS[*]})."
-                echo "      Abortando SEM mexer no container atual."
-                exit 1
-              fi
-              ;;
-          
-            *)
-              echo "ERRO: ENV_NAME inválido. Use development|staging|production."
-              exit 1
-              ;;
-          esac
-          
-          
-          # Aplica sysctl no host (idempotente)
-          echo "[6/10] Aplicando sysctl no host..."
-          ensure_sysctl_host
-          
-          echo "[7/10] Removendo container antigo (se existir)..."
-          docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-          
-          # --- Portas (usadas somente em dev/bridge; em prod com host network são ignoradas) ---
-          PORT_FLAGS=()
-          IFS=',' read -r -a PORT_ITEMS <<< "${DOCKER_PORTS}"
-          for item in "${PORT_ITEMS[@]}"; do
-            item="$(echo "$item" | xargs)"; [[ -z "$item" ]] && continue
-            proto="tcp"; base="$item"
-            [[ "$item" == *"/"* ]] && { base="${item%%/*}"; proto="${item##*/}"; }
-            if [[ "$base" == *":"* ]]; then host="${base%%:*}"; cont="${base##*:}"; else host="$base"; cont="$base"; fi
-            if [[ "$proto" == "tcp" ]]; then PORT_FLAGS+=("-p" "${host}:${cont}"); else PORT_FLAGS+=("-p" "${host}:${cont}/${proto}"); fi
-          done
-          echo "[INFO] Portas declaradas: ${DOCKER_PORTS}"
-          
-          # Flags de sysctl por container (complementam o sysctl do host)
-          DOCKER_SYSCTL=(
-            --sysctl net.core.somaxconn=4096
-            --sysctl net.ipv4.tcp_max_syn_backlog=8192
-            --sysctl net.ipv4.tcp_keepalive_time=60
-            --sysctl net.ipv4.tcp_keepalive_intvl=15
-            --sysctl net.ipv4.tcp_keepalive_probes=4
-          )
-          
-          echo "[8/10] Criando container ${CONTAINER_NAME} (modo $( [[ $USE_HOST_NETWORK -eq 1 ]] && echo host || echo bridge ))..."
-          CREATE_ARGS=(--name "${CONTAINER_NAME}" --restart unless-stopped)
-          # logging: limita crescimento dos logs (json-file local OU envia pra CloudWatch)
-          CREATE_ARGS+=(--log-driver "${LOG_DRIVER}")
-          if [[ "${LOG_DRIVER}" == "awslogs" ]]; then
-            # CloudWatch Logs: requer log group já existente (retenção controlada lá).
-            # AWSLOGS_GROUP é obrigatório; AWSLOGS_STREAM_PREFIX vira o prefixo dos
-            # streams criados (default = nome da instância via $(hostname)).
-            : "${AWSLOGS_GROUP:?defina AWSLOGS_GROUP quando LOG_DRIVER=awslogs}"
-            CREATE_ARGS+=(
-              --log-opt "awslogs-region=${AWSLOGS_REGION:-${REGION}}"
-              --log-opt "awslogs-group=${AWSLOGS_GROUP}"
-              --log-opt "awslogs-stream=${AWSLOGS_STREAM:-${CONTAINER_NAME}-$(hostname)}"
-            )
-            [[ -n "${AWSLOGS_CREATE_GROUP:-}" ]] && CREATE_ARGS+=(--log-opt "awslogs-create-group=${AWSLOGS_CREATE_GROUP}")
-          else
-            CREATE_ARGS+=(
-              --log-opt "max-size=${LOG_MAX_SIZE}"
-              --log-opt "max-file=${LOG_MAX_FILE}"
-            )
-          fi
-          
-          
-          # ulimit para muitas conexões
-          CREATE_ARGS+=(--ulimit "nofile=${NOFILE_LIMIT}:${NOFILE_LIMIT}")
-          
-          # sysctl dentro do container
-          if [[ "$USE_HOST_NETWORK" -eq 0 ]]; then
-            CREATE_ARGS+=("${DOCKER_SYSCTL[@]}")
-          fi
-          
-          # env-file e envs úteis
-          if [[ -n "$ENV_FILE" ]]; then
-            SANITIZED_ENV="$(mktemp)"
-            awk '{
-              sub(/\r$/, "")      # remove CRLF
-            }
-            /^\s*($|#)/ { next }  # ignora vazio/comentário
-            /^\s*(BUNDLE_PATH|GEM_HOME|BUNDLE_WITHOUT)\s*=/ { next }  # bloqueia variáveis-problema
-            { print }' "$ENV_FILE" > "$SANITIZED_ENV"
-            ENV_FILE="$SANITIZED_ENV"
-            echo " - Sanitizado env-file (removido BUNDLE_PATH/GEM_HOME/BUNDLE_WITHOUT)"
-          fi
-          
-          [[ -n "${ENV_FILE}" ]] && CREATE_ARGS+=(--env-file "${ENV_FILE}")
-          
-          
-          CREATE_ARGS+=(-e "UV_THREADPOOL_SIZE=${UV_THREADPOOL_SIZE}")
-          CREATE_ARGS+=(-e "NODE_OPTIONS=${NODE_OPTIONS}")
-          
-          # rede
-          if [[ "$USE_HOST_NETWORK" -eq 1 ]]; then
-            CREATE_ARGS+=(--network host)
-          else
-            CREATE_ARGS+=("${PORT_FLAGS[@]}")
-          fi
-          
-          CREATE_ARGS+=(-w "${WORKDIR_ON_IMAGE}")
-          CREATE_ARGS+=(-e BUNDLE_PATH=/usr/local/bundle -e GEM_HOME=/usr/local/bundle -e BUNDLE_WITHOUT=development:test)
-          
-          
-          # Cria parado para poder copiar o conteúdo do S3 para o WORKDIR antes de iniciar (production)
-          CID="$(
-            docker create "${CREATE_ARGS[@]}" "${IMAGE_URI}" sh -lc "$DOCKER_CMD"
-          )"
-          echo " - Container criado: ${CID}"
-          
-          # Em produção: copiar payload S3 → WORKDIR do container
-          if [[ "$USE_HOST_NETWORK" -eq 1 ]]; then
-            echo " - Copiando payload do S3 para ${WORKDIR_ON_IMAGE} dentro do container..."
-            docker exec "${CID}" /bin/sh -lc "mkdir -p '${WORKDIR_ON_IMAGE}'" 2>/dev/null || true
-            if [ -d "${TMPDIR}/payload" ]; then
-              docker cp "${TMPDIR}/payload/." "${CID}:${WORKDIR_ON_IMAGE}/" || true
-            fi
-          fi
-          
-          # ... (todo o seu script acima permanece igual)
-          
-          echo "[9/10] Iniciando container..."
-          docker start "${CID}" >/dev/null
-          
-          # Marca deploy ok só depois que o container iniciou
-          DEPLOY_OK=1
-          
-          # ====== LIMPEZA LOCAL DE IMAGENS (após sucesso) ======
-          cleanup_local_images_keep_n() {
-            local repo="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO_NAME}"
-            local keep_n="${KEEP_N:-2}"   # quantas versões manter (além da em uso)
-          
-            echo "[INFO] Limpando imagens antigas localmente para repo: ${repo} (mantendo ${keep_n})..."
-          
-            # Imagem em uso por containers rodando (IDs)
-            mapfile -t used_img_ids < <(docker ps --format '{{.Image}}' \
-              | xargs -r docker image inspect --format '{{.Id}}' 2>/dev/null \
-              | sort -u)
-          
-            # Lista todas as imagens do repo com ID e Created (ordenadas do mais novo p/ velho)
-            mapfile -t repo_imgs < <(
-              docker images --no-trunc --format '{{.Repository}} {{.ID}} {{.CreatedAt}} {{.Tag}}' \
-                | awk -v r="${repo}" '$1==r {print $0}' \
-                | sort -rk3  # CreatedAt desc
-            )
-          
-            # Se nada encontrado, sai limpo
-            [[ ${#repo_imgs[@]} -eq 0 ]] && { echo "[INFO] Nenhuma imagem local do repo."; return 0; }
-          
-            # Mantém as "keep_n" mais recentes + quaisquer imagens atualmente em uso
-            local kept=0
-            local to_delete=()
-          
-            for line in "${repo_imgs[@]}"; do
-              # Campos: REPO IMGID CREATED TAG
-              local img_repo img_id created tag
-              img_repo="$(awk '{print $1}' <<<"$line")"
-              img_id="$(awk '{print $2}' <<<"$line")"
-              tag="$(awk '{print $4}' <<<"$line")"
-          
-              # Se imagem está em uso, mantém
-              if printf '%s\n' "${used_img_ids[@]}" | grep -qx "$img_id"; then
-                # Em uso: não conta no keep_n (ela já é obrigatória)
-                continue
-              fi
-          
-              # Mantém as N mais novas (além das em uso)
-              if (( kept < keep_n )); then
-                kept=$((kept+1))
-                continue
-              fi
-          
-              # Demais vão pra remoção
-              to_delete+=("$img_id")
-            done
-          
-            # Remove as selecionadas
-            if [[ ${#to_delete[@]} -gt 0 ]]; then
-              echo "[INFO] Removendo ${#to_delete[@]} imagens antigas..."
-              docker rmi -f "${to_delete[@]}" || true
-            else
-              echo "[INFO] Nada para remover."
-            fi
-          
-            # Opcional: remover <dangling> globais (camadas órfãs), seguro
-            echo "[INFO] Removendo camadas órfãs (dangling) globais..."
-            docker image prune -f >/dev/null 2>&1 || true
-          }
-          
-          # Só limpa se tudo correu bem
-          if [[ "${DEPLOY_OK:-0}" -eq 1 ]]; then
-            cleanup_local_images_keep_n
-          fi
-          
-          echo "[10/10] Pronto!"
-          [[ -n "${ENV_FILE}" ]] && echo "ENV usado: ${ENV_FILE}"
-          [[ "$USE_HOST_NETWORK" -eq 1 ]] && echo "Host network ligado; payload copiado para ${WORKDIR_ON_IMAGE}."
-          echo "ulimit nofile (solicitado): ${NOFILE_LIMIT}"
-          echo "Threadpool: ${UV_THREADPOOL_SIZE} | NODE_OPTIONS: ${NODE_OPTIONS}"
-          echo "=============================================================="
-          echo "SUCESSO"
-          echo "=============================================================="
-          echo "LOGS com comando abaixo"
-          echo "sudo docker logs --tail 100 -f ${CONTAINER_NAME}"
-          echo "=============================================================="
-          echo "Bash no container com comando abaixo"
-          echo "sudo docker exec -it ${CONTAINER_NAME} bash"
-          echo "=============================================================="
-          
+          # base64 do gzip do script — ver comentario em scripts/gerar_workflows.sh
+          # sobre o teto de 21000 caracteres por bloco `run:` do GitHub Actions.
+          cat > /tmp/ga/script.sh.gz.b64 <<'GA_SCRIPT_EOF'
+          H4sIAAAAAAACA81b3W7jSHa+11PU0J611NPUj/+tbs1Ga6ndwtqWY8k9u5nplUtkSeY0RXJYlN3dbgcBAuQiNwGCXOUqk70IJreD
+          AMFcxm+yL5BXyHeqihQpy9O92Q0QYaYlklWnzjl1fr5zil77rDaXcW3sBTURXLMxl1elNeaGzhsRj8Rb4YyEE1fpJm6fnfdfdU97
+          939/ethrsz/8zT8x5/7HyONs4gkfk9jUkwmL7n8a+54TsktXBOHNTW1buFvcGW+6B9ubLt+bOAfOXp27453t+q6zve1egjRjsbj2
+          5P3vQ+YKFsbeVMxYk012Jm4D/4/3nL3NRmNnvLvZEO6+W580dvc2xaY42BS7O7sNVt6sb+7a9R27vldR5OQV39zZJaaImBdwv8kO
+          trYE3z444JOdXWd3vNs4AANbu5MG3xR7Bzv1TS7q246YbLnu1ngs3D0M2eMO5kz2x/WdhiI85t5bDrLgz3yaTC++j8WVnroyEYzH
+          382965Dd/8A4e9E/HXZZp81edc877U4XtyIeJ15M0vJpGPMq62v1YbyQkfCvQuaLKVaqguJ56HJ2DU1fOvPYZx+YnIMF2q1L5oSz
+          kMVhmBBLwz4W6R5u0l2W8Cm7jOLwW5GE8lJtWBTGCY89/hREpTPyvQAb/RQ/pRfhi/Y9saWIr0VcZQMQpG0RN3iE35EXBF4wZUJd
+          YYg38Rx+/29610DRCxIxjT2Xu6LJvptjkHC9hEuJLdXSJV5wxTW3AZcYw5M4ZLP776EsuhEQpcgP32GJ6ZzokfivRMzOBof29j7J
+          eEmPYh44fCSdy6pSeTtk3E9EzOMmm82h1PZfXvSeMj6OOcz2KbF8/yMTQUK8xiKaw0TBYMqWYOP5LMLV4GWbxKQNDkIJwjdh/Gbi
+          hzeSXTY2R1CmO4qFhA6TkVHTu5l/CTuTbIcIh7LKTufgTYmeLeB6MTahWipJkTBbzEOsEokJ9/xSae2TPuDlQoasDKecQUGy0sQd
+          ZQ32RA6O2VWSRLJZq9Fy1amXXM3Hc3DohNBhkFRhD7VP9MdazG/YN8rYjaHZXUbR4WX/pNuy1unLUsbHbMlsOzMqZm3V642nB/V6
+          nf5Rv3YsZgUR7Gge0P8jE1q8GZ8Ki5E+507ihYHaxY6QvjfFHpJ10sK0hMM29CQ2j1wOldq22YEWrCVb+xe/MGGLySSMsvsbn6re
+          P2IfRByNbsQYC3FElun/m30gvgxPzNqp79She/3YhxKrtap0Yi9KZA3Mp04urzYslk2qgQQmpYRISn1p/W/3J09qeY/yz/64fWIt
+          9WGH/dMXvSN21u6c3/9t39wtnXePev3TljWXtuAysRtWqX142L84HY56nZa109jd393c291rbG5bpVL38Hx03j3rj07bSq23jTuL
+          rfisscZ//YSwPm1qP/eS+x9jL0S0PS91+oe/7p6PzvrnwwGR2FxJYo1tphTgKY269pRqtWqxcK5vNbP7TfrHSikfnnSI7tYjdLdS
+          ujAvHrgURAMKrPhFhse9QMSl7umrTMbtpr3wPUN0jW2nZFxxLfwwmoHKh5yPftU//3Wndz7qn456J+0jRWmnaddk7KSMrSEM0jVJ
+          RNZUwhYN271TyJCuvdu01wtKx9w1tsuKI0unMO/RWXswbI9O+6PBFk3de2Tq8thSSfE3GraPWpYPo5QJdnqNDecqgZWjEClChmMY
+          qoMMB4OkfAnfqmDZF73j7ui4d9Ib0pL566bdqG/v7+zt3lmli1ej4cvzbrtz1u8fjwa9v1KyPbyLOTT8tN/pjvpnQxjmQJNdXDdt
+          y7Zn/K0d+q4tIyAOW3rvRatRh4HeKcYP+QyZE0kmFrMQ2RwiZNtSKWnJB1tQwfBly5JbiD/SsSGPF4cB7aKs0ZJFJaktW2MJOTJH
+          /kXKje+/hyYA6XALAIWz9dvlPb/L+d/KD7F77M0o+UHJfjiVZIYd7fcrNE+wRmn+uH806pz3AJFIQYurpv2tDAN74vkCyqD7J+3f
+          ZBrPX9P+zHJjaOfyY+i6aW+RSgnOggcEQa7iKRTLfcIj5D1zqb4oxJW8Cfv6a7beveh1kLi/Y3WKYnbAQHZw0emPLgbEIXT5+vUz
+          llyJoMSYeEvpJ43T5amg0A+FSnnjYmI2z0Jgd+YABG4T2WO3YpUmXikLX+u37a8Go073RfvieDjSd2H/+gfJQI9hQoNWuVICj5op
+          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
+          quoZG7v9sLtNf0Hz52Ky9D+r2hC3cDkAAA==
           GA_SCRIPT_EOF
+          base64 -d /tmp/ga/script.sh.gz.b64 | gunzip > /tmp/ga/script.sh
+          bash -n /tmp/ga/script.sh   # falha aqui e nao na EC2 se o embed corromper
           # Um argumento por linha — preserva espaços (ex: "npm run run_docker_image")
           # sem depender de quoting sobrevivendo até o SSM.
           cat > /tmp/ga/args <<'GA_ARGS_EOF'
