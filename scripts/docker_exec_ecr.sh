@@ -1,0 +1,400 @@
+#!/usr/bin/env bash
+# docker_exec_ecr.sh
+#
+# PROVENIÊNCIA — cópia fiel do gist público `denoww/4ed3acb2d942da7fc9c70adb5406c44d`
+#   revisão de origem : f5fd15fdb7c72115b621ed8d0f1672e2e92e6561 (2026-05-07)
+#   sha256 do original: 933ea499af56c6b61906c36f1a2e79502ae04cef3dd3bbed7b617acea4f8b051
+#   baixado em        : 2026-08-07
+#
+# Este arquivo é a FONTE DA VERDADE a partir de agora. O gist é espelho legado.
+# Roda via `curl | sudo bash` como root em TODA EC2 com tag `projetos` — portaria,
+# sc_linker, scsip, socket-server. Sem review, sem pinning e sem verificação de
+# integridade: quem editasse o gist tinha root nas quatro máquinas no deploy seguinte.
+# Ver PSC-48 em `seguranca_sc`.
+#
+# Ao alterar: mude AQUI, abra PR, e só então republique o gist e bump o SHA pinado nos
+# workflows `12_prod_restart_server.yml` dos 5 repos. Nunca edite o gist direto.
+
+set -euo pipefail
+
+######################################
+# Uso (exemplos):
+# curl -fsSL https://gist.githubusercontent.com/denoww/4ed3acb2d942da7fc9c70adb5406c44d/raw \
+#   | sudo -E env HOME="$HOME" bash -s -- portaria "3001,9000,9001,9005" "npm run run_docker_image" production
+#
+# Desligar:
+# sudo sh -c 'docker update --restart=no portaria && docker stop portaria'
+######################################
+
+
+######################################
+# erp_web staging
+# curl -fsSL https://gist.githubusercontent.com/denoww/4ed3acb2d942da7fc9c70adb5406c44d/raw \
+#   | sudo -E env HOME="$HOME" bash -s -- erp_staging "5050" "bash -lc './.scripts/web-server.sh'" staging "/erp" "erp_stag_web" "erp"
+#
+# Desligar:
+# sudo sh -c 'docker update --restart=no erp_stag_web && docker stop erp_stag_web'
+######################################
+
+
+### ====== CONFIG PADRÃO ======
+REGION="us-east-1"
+ACCOUNT_ID="516862767124"
+
+ECR_REPO_NAME="${1}"                    # 1º arg: repositório ECR
+DOCKER_PORTS="${2}"                   # 2º arg: "3010,9000,..." ou "3010:3010,9000:9000"
+DOCKER_CMD="${3}"                   # 3º arg: comando dentro do container
+ENV_NAME="${4:-production}"     # 4º arg: development|production
+WORKDIR_ON_IMAGE="${5:-/src}"      # 5 /src ou /erp
+CONTAINER_NAME="${6:-$ECR_REPO_NAME}" # 6 CONTAINER_NAME
+NOME_PASTA_NO_S3="${7:-$ECR_REPO_NAME}" # 6 NOME_PASTA_NO_S3
+
+IMAGE_TAG="latest"
+
+# Tuning (pode sobrescrever com env)
+NOFILE_LIMIT="${NOFILE_LIMIT:-1048576}"
+UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-16}"
+NODE_OPTIONS="${NODE_OPTIONS:-"--max-old-space-size=1024"}"
+
+# Caminhos remotos (production)
+PASTA_S3_PATH="s3://sc-environments/${NOME_PASTA_NO_S3}"   # tudo aqui será copiado para ${WORKDIR_ON_IMAGE}
+### ===========================
+
+# Limite de logs do Docker (pode sobrescrever via env)
+LOG_DRIVER="${LOG_DRIVER:-json-file}"
+LOG_MAX_SIZE="${LOG_MAX_SIZE:-10m}"
+LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
+
+
+# Preserva HOME real quando usando sudo
+if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+  export HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+fi
+
+REGION="${AWS_DEFAULT_REGION:-$REGION}"
+
+AWS_OPTS=()
+[[ -n "${AWS_PROFILE:-}" ]] && AWS_OPTS+=(--profile "$AWS_PROFILE")
+AWS_OPTS+=(--region "$REGION")
+
+IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}"
+
+ensure_sysctl_host() {
+  # Aplica tunings no host (beneficia host network e geralmente o bridge também)
+  local F=/etc/sysctl.d/99-socket.conf
+  sudo tee "$F" >/dev/null <<'EOF'
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 4
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.ipv4.tcp_rmem = 4096 87380 134217728
+net.ipv4.tcp_wmem = 4096 65536 134217728
+EOF
+  sudo sysctl --system
+}
+
+echo "[1/10] Instalando Docker + AWS CLI (se necessário)..."
+if ! command -v docker >/dev/null 2>&1; then
+  curl -fsSL https://get.docker.com | sh
+  id -nG 2>/dev/null | grep -qw docker || usermod -aG docker "${SUDO_USER:-$USER}" || true
+fi
+if ! command -v aws >/dev/null 2>&1; then
+  apt-get update -y && apt-get install -y unzip
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+  unzip -q awscliv2.zip && ./aws/install
+fi
+systemctl enable --now docker >/dev/null 2>&1 || true
+
+echo "[2/10] Validando credenciais AWS..."
+aws "${AWS_OPTS[@]}" sts get-caller-identity >/dev/null 2>&1 || {
+  echo "ERRO: credenciais AWS inválidas ou ausentes."
+  echo " - Em EC2: Actions -> Security -> Modify IAM role → selecione 'Admin Access'"
+  echo " - Em dev: rode 'aws configure'"
+  exit 1
+}
+
+echo "[3/10] Login no ECR..."
+aws "${AWS_OPTS[@]}" ecr get-login-password \
+  | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+
+echo "[4/10] Pull da imagem ${IMAGE_URI}..."
+docker pull "${IMAGE_URI}"
+
+# Diretório temporário para sync do S3
+TMPDIR="$(mktemp -d)"
+cleanup() { rm -rf "${TMPDIR}" || true; }
+trap cleanup EXIT
+
+echo "[5/10] Preparando (${ENV_NAME})..."
+USE_HOST_NETWORK=0
+ENV_FILE=""
+
+case "$ENV_NAME" in
+  development|dev)
+    USE_HOST_NETWORK=0
+    echo " - [DEV] Tentando extrair /src/env_DEV da imagem para usar como --env-file..."
+    TMP_ENV_DEV="$(mktemp)"
+    if docker run --rm "${IMAGE_URI}" sh -lc 'cat /src/env_DEV 2>/dev/null || true' > "${TMP_ENV_DEV}"; then
+      if [[ -s "${TMP_ENV_DEV}" ]]; then
+        ENV_FILE="${TMP_ENV_DEV}"
+        echo " - [DEV] env_DEV encontrado: ${ENV_FILE}"
+      else
+        rm -f "${TMP_ENV_DEV}"
+        echo " - [DEV] /src/env_DEV não encontrado; seguindo sem --env-file."
+      fi
+    fi
+    ;;
+
+  staging|production|prod)
+    USE_HOST_NETWORK=1
+
+    # Mapeia sufixo do arquivo
+    case "$ENV_NAME" in
+      staging) SUFIXO="STAG" ;;
+      production|prod) SUFIXO="PROD" ;;
+    esac
+
+    echo " - Sincronizando ${PASTA_S3_PATH} → ${TMPDIR}/payload ..."
+    mkdir -p "${TMPDIR}/payload"
+    # ⚠️ NÃO devolver este erro pra `|| true`. Era assim até 07/08/2026 e custou ~10 min
+    # de socket-server fora do ar: a role da EC2 tinha perdido o S3, o sync falhou, o
+    # script SEGUIU, derrubou o container bom e subiu um sem env — que entrou em crash
+    # loop tentando resolver o host `redis` (default de dev). O job ficou VERDE.
+    # Em staging/production o env é obrigatório: sem ele, aborte ANTES de tocar no
+    # container que está rodando. Deploy que falha e não mexe em nada é o desfecho bom.
+    if ! aws "${AWS_OPTS[@]}" s3 sync "${PASTA_S3_PATH}/" "${TMPDIR}/payload/" --delete --only-show-errors; then
+      echo "ERRO: falhou baixar o env de ${PASTA_S3_PATH} (permissão da role da EC2? bucket?)."
+      echo "      Abortando SEM mexer no container atual."
+      exit 1
+    fi
+
+    # Ordem de preferência de nomes (ajuste se quiser)
+    CANDIDATOS=(
+      "env_${SUFIXO}"
+      "env_${SUFIXO}.env"
+      ".env.${ENV_NAME}"
+      ".env"
+    )
+
+    for f in "${CANDIDATOS[@]}"; do
+      if [[ -f "${TMPDIR}/payload/$f" ]]; then
+        ENV_FILE="${TMPDIR}/payload/$f"
+        echo " - [${ENV_NAME^^}] Arquivo de env encontrado: ${ENV_FILE}"
+        break
+      fi
+    done
+
+    if [[ -z "$ENV_FILE" ]]; then
+      # Mesma lição do sync acima: em staging/production, "seguir sem --env-file" é
+      # trocar um deploy que falha por um container que sobe quebrado. Abortar.
+      echo "ERRO: nenhum arquivo de env em ${PASTA_S3_PATH} (candidatos: ${CANDIDATOS[*]})."
+      echo "      Abortando SEM mexer no container atual."
+      exit 1
+    fi
+    ;;
+
+  *)
+    echo "ERRO: ENV_NAME inválido. Use development|staging|production."
+    exit 1
+    ;;
+esac
+
+
+# Aplica sysctl no host (idempotente)
+echo "[6/10] Aplicando sysctl no host..."
+ensure_sysctl_host
+
+echo "[7/10] Removendo container antigo (se existir)..."
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+
+# --- Portas (usadas somente em dev/bridge; em prod com host network são ignoradas) ---
+PORT_FLAGS=()
+IFS=',' read -r -a PORT_ITEMS <<< "${DOCKER_PORTS}"
+for item in "${PORT_ITEMS[@]}"; do
+  item="$(echo "$item" | xargs)"; [[ -z "$item" ]] && continue
+  proto="tcp"; base="$item"
+  [[ "$item" == *"/"* ]] && { base="${item%%/*}"; proto="${item##*/}"; }
+  if [[ "$base" == *":"* ]]; then host="${base%%:*}"; cont="${base##*:}"; else host="$base"; cont="$base"; fi
+  if [[ "$proto" == "tcp" ]]; then PORT_FLAGS+=("-p" "${host}:${cont}"); else PORT_FLAGS+=("-p" "${host}:${cont}/${proto}"); fi
+done
+echo "[INFO] Portas declaradas: ${DOCKER_PORTS}"
+
+# Flags de sysctl por container (complementam o sysctl do host)
+DOCKER_SYSCTL=(
+  --sysctl net.core.somaxconn=4096
+  --sysctl net.ipv4.tcp_max_syn_backlog=8192
+  --sysctl net.ipv4.tcp_keepalive_time=60
+  --sysctl net.ipv4.tcp_keepalive_intvl=15
+  --sysctl net.ipv4.tcp_keepalive_probes=4
+)
+
+echo "[8/10] Criando container ${CONTAINER_NAME} (modo $( [[ $USE_HOST_NETWORK -eq 1 ]] && echo host || echo bridge ))..."
+CREATE_ARGS=(--name "${CONTAINER_NAME}" --restart unless-stopped)
+# logging: limita crescimento dos logs (json-file local OU envia pra CloudWatch)
+CREATE_ARGS+=(--log-driver "${LOG_DRIVER}")
+if [[ "${LOG_DRIVER}" == "awslogs" ]]; then
+  # CloudWatch Logs: requer log group já existente (retenção controlada lá).
+  # AWSLOGS_GROUP é obrigatório; AWSLOGS_STREAM_PREFIX vira o prefixo dos
+  # streams criados (default = nome da instância via $(hostname)).
+  : "${AWSLOGS_GROUP:?defina AWSLOGS_GROUP quando LOG_DRIVER=awslogs}"
+  CREATE_ARGS+=(
+    --log-opt "awslogs-region=${AWSLOGS_REGION:-${REGION}}"
+    --log-opt "awslogs-group=${AWSLOGS_GROUP}"
+    --log-opt "awslogs-stream=${AWSLOGS_STREAM:-${CONTAINER_NAME}-$(hostname)}"
+  )
+  [[ -n "${AWSLOGS_CREATE_GROUP:-}" ]] && CREATE_ARGS+=(--log-opt "awslogs-create-group=${AWSLOGS_CREATE_GROUP}")
+else
+  CREATE_ARGS+=(
+    --log-opt "max-size=${LOG_MAX_SIZE}"
+    --log-opt "max-file=${LOG_MAX_FILE}"
+  )
+fi
+
+
+# ulimit para muitas conexões
+CREATE_ARGS+=(--ulimit "nofile=${NOFILE_LIMIT}:${NOFILE_LIMIT}")
+
+# sysctl dentro do container
+if [[ "$USE_HOST_NETWORK" -eq 0 ]]; then
+  CREATE_ARGS+=("${DOCKER_SYSCTL[@]}")
+fi
+
+# env-file e envs úteis
+if [[ -n "$ENV_FILE" ]]; then
+  SANITIZED_ENV="$(mktemp)"
+  awk '{
+    sub(/\r$/, "")      # remove CRLF
+  }
+  /^\s*($|#)/ { next }  # ignora vazio/comentário
+  /^\s*(BUNDLE_PATH|GEM_HOME|BUNDLE_WITHOUT)\s*=/ { next }  # bloqueia variáveis-problema
+  { print }' "$ENV_FILE" > "$SANITIZED_ENV"
+  ENV_FILE="$SANITIZED_ENV"
+  echo " - Sanitizado env-file (removido BUNDLE_PATH/GEM_HOME/BUNDLE_WITHOUT)"
+fi
+
+[[ -n "${ENV_FILE}" ]] && CREATE_ARGS+=(--env-file "${ENV_FILE}")
+
+
+CREATE_ARGS+=(-e "UV_THREADPOOL_SIZE=${UV_THREADPOOL_SIZE}")
+CREATE_ARGS+=(-e "NODE_OPTIONS=${NODE_OPTIONS}")
+
+# rede
+if [[ "$USE_HOST_NETWORK" -eq 1 ]]; then
+  CREATE_ARGS+=(--network host)
+else
+  CREATE_ARGS+=("${PORT_FLAGS[@]}")
+fi
+
+CREATE_ARGS+=(-w "${WORKDIR_ON_IMAGE}")
+CREATE_ARGS+=(-e BUNDLE_PATH=/usr/local/bundle -e GEM_HOME=/usr/local/bundle -e BUNDLE_WITHOUT=development:test)
+
+
+# Cria parado para poder copiar o conteúdo do S3 para o WORKDIR antes de iniciar (production)
+CID="$(
+  docker create "${CREATE_ARGS[@]}" "${IMAGE_URI}" sh -lc "$DOCKER_CMD"
+)"
+echo " - Container criado: ${CID}"
+
+# Em produção: copiar payload S3 → WORKDIR do container
+if [[ "$USE_HOST_NETWORK" -eq 1 ]]; then
+  echo " - Copiando payload do S3 para ${WORKDIR_ON_IMAGE} dentro do container..."
+  docker exec "${CID}" /bin/sh -lc "mkdir -p '${WORKDIR_ON_IMAGE}'" 2>/dev/null || true
+  if [ -d "${TMPDIR}/payload" ]; then
+    docker cp "${TMPDIR}/payload/." "${CID}:${WORKDIR_ON_IMAGE}/" || true
+  fi
+fi
+
+# ... (todo o seu script acima permanece igual)
+
+echo "[9/10] Iniciando container..."
+docker start "${CID}" >/dev/null
+
+# Marca deploy ok só depois que o container iniciou
+DEPLOY_OK=1
+
+# ====== LIMPEZA LOCAL DE IMAGENS (após sucesso) ======
+cleanup_local_images_keep_n() {
+  local repo="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO_NAME}"
+  local keep_n="${KEEP_N:-2}"   # quantas versões manter (além da em uso)
+
+  echo "[INFO] Limpando imagens antigas localmente para repo: ${repo} (mantendo ${keep_n})..."
+
+  # Imagem em uso por containers rodando (IDs)
+  mapfile -t used_img_ids < <(docker ps --format '{{.Image}}' \
+    | xargs -r docker image inspect --format '{{.Id}}' 2>/dev/null \
+    | sort -u)
+
+  # Lista todas as imagens do repo com ID e Created (ordenadas do mais novo p/ velho)
+  mapfile -t repo_imgs < <(
+    docker images --no-trunc --format '{{.Repository}} {{.ID}} {{.CreatedAt}} {{.Tag}}' \
+      | awk -v r="${repo}" '$1==r {print $0}' \
+      | sort -rk3  # CreatedAt desc
+  )
+
+  # Se nada encontrado, sai limpo
+  [[ ${#repo_imgs[@]} -eq 0 ]] && { echo "[INFO] Nenhuma imagem local do repo."; return 0; }
+
+  # Mantém as "keep_n" mais recentes + quaisquer imagens atualmente em uso
+  local kept=0
+  local to_delete=()
+
+  for line in "${repo_imgs[@]}"; do
+    # Campos: REPO IMGID CREATED TAG
+    local img_repo img_id created tag
+    img_repo="$(awk '{print $1}' <<<"$line")"
+    img_id="$(awk '{print $2}' <<<"$line")"
+    tag="$(awk '{print $4}' <<<"$line")"
+
+    # Se imagem está em uso, mantém
+    if printf '%s\n' "${used_img_ids[@]}" | grep -qx "$img_id"; then
+      # Em uso: não conta no keep_n (ela já é obrigatória)
+      continue
+    fi
+
+    # Mantém as N mais novas (além das em uso)
+    if (( kept < keep_n )); then
+      kept=$((kept+1))
+      continue
+    fi
+
+    # Demais vão pra remoção
+    to_delete+=("$img_id")
+  done
+
+  # Remove as selecionadas
+  if [[ ${#to_delete[@]} -gt 0 ]]; then
+    echo "[INFO] Removendo ${#to_delete[@]} imagens antigas..."
+    docker rmi -f "${to_delete[@]}" || true
+  else
+    echo "[INFO] Nada para remover."
+  fi
+
+  # Opcional: remover <dangling> globais (camadas órfãs), seguro
+  echo "[INFO] Removendo camadas órfãs (dangling) globais..."
+  docker image prune -f >/dev/null 2>&1 || true
+}
+
+# Só limpa se tudo correu bem
+if [[ "${DEPLOY_OK:-0}" -eq 1 ]]; then
+  cleanup_local_images_keep_n
+fi
+
+echo "[10/10] Pronto!"
+[[ -n "${ENV_FILE}" ]] && echo "ENV usado: ${ENV_FILE}"
+[[ "$USE_HOST_NETWORK" -eq 1 ]] && echo "Host network ligado; payload copiado para ${WORKDIR_ON_IMAGE}."
+echo "ulimit nofile (solicitado): ${NOFILE_LIMIT}"
+echo "Threadpool: ${UV_THREADPOOL_SIZE} | NODE_OPTIONS: ${NODE_OPTIONS}"
+echo "=============================================================="
+echo "SUCESSO"
+echo "=============================================================="
+echo "LOGS com comando abaixo"
+echo "sudo docker logs --tail 100 -f ${CONTAINER_NAME}"
+echo "=============================================================="
+echo "Bash no container com comando abaixo"
+echo "sudo docker exec -it ${CONTAINER_NAME} bash"
+echo "=============================================================="
+
