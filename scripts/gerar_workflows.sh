@@ -34,14 +34,15 @@ embutir() {
 }
 
 gerar() {
-  local nome=$1 script=$2 descricao=$3 inputs_yaml=$4 args_yaml_bruto=$5
+  local nome=$1 script=$2 descricao=$3 inputs_yaml=$4 args_yaml_bruto=$5 env_yaml_bruto=${6:-} nlb_expr=${7:-\'\'}
   local destino=".github/workflows/${nome}.yml"
 
   # Tudo que entra no bloco `run:` do YAML precisa dos 10 espaços — inclusive os
   # terminadores de heredoc. O YAML remove essa indentação, e aí o `GA_SCRIPT_EOF`
   # cai na coluna 0 do shell, que é onde o bash espera encontrá-lo.
-  local args_yaml
+  local args_yaml env_yaml
   args_yaml=$(printf '%s\n' "$args_yaml_bruto" | sed 's/^/          /')
+  env_yaml=$(printf '%s\n' "$env_yaml_bruto" | sed 's/^/          /')
 
   {
     cat <<YAML
@@ -121,6 +122,8 @@ jobs:
       - name: Escrever script e argumentos
         if: steps.discover.outputs.instance_ids != ''
         shell: bash
+        env:
+          GA_NLB_NAME: ${nlb_expr}
         run: |
           mkdir -p /tmp/ga
           cat > /tmp/ga/script.sh <<'GA_SCRIPT_EOF'
@@ -135,6 +138,17 @@ YAML
           cat > /tmp/ga/args <<'GA_ARGS_EOF'
 ${args_yaml}
           GA_ARGS_EOF
+          # Variáveis de ambiente que o script lê (não são argumentos).
+          # docker_exec_ecr.sh:64,243 lê LOG_DRIVER e exige AWSLOGS_GROUP quando
+          # o driver é awslogs — sc_linker e scsip dependem disso.
+          cat > /tmp/ga/env <<'GA_ENV_EOF'
+${env_yaml}
+          GA_ENV_EOF
+          # \`--nlb-name\` só existe pro portaria. Passar a flag com valor vazio faria o
+          # script tratar "" como nome de NLB; então a flag entra só quando ha valor.
+          if [ -n "\${GA_NLB_NAME:-}" ]; then
+            printf '%s\\n%s\\n' '--nlb-name' "\$GA_NLB_NAME" >> /tmp/ga/args
+          fi
 
       - name: Executar via SSM
         if: steps.discover.outputs.instance_ids != ''
@@ -152,18 +166,21 @@ ${args_yaml}
 
           SCRIPT_B64="\$(base64 -w0 < /tmp/ga/script.sh)"
           ARGS_B64="\$(base64 -w0 < /tmp/ga/args)"
-          echo "Tamanho do payload: script=\${#SCRIPT_B64}B args=\${#ARGS_B64}B (teto do SSM: 100KB)"
+          ENV_B64="\$(base64 -w0 < /tmp/ga/env)"
+          echo "Tamanho do payload: script=\${#SCRIPT_B64}B args=\${#ARGS_B64}B env=\${#ENV_B64}B (teto do SSM: 100KB)"
 
           FAIL=0
           for ID in \$INSTANCE_IDS; do
             echo "::group::Enviando comando para \$ID"
 
-            C1="printf %s '\$SCRIPT_B64' > /tmp/ga_cmd.sh.b64; printf %s '\$ARGS_B64' > /tmp/ga_args.b64"
+            C1="printf %s '\$SCRIPT_B64' > /tmp/ga_cmd.sh.b64; printf %s '\$ARGS_B64' > /tmp/ga_args.b64; printf %s '\$ENV_B64' > /tmp/ga_env.b64"
             # \`sudo -E env HOME="\$HOME"\` é obrigatório: o script recupera o HOME real
             # sob sudo (docker_exec_ecr.sh:56-58). Rodar sem isso quebra o docker login.
+            # \`set -a\` + source exporta o env antes do sudo; o \`-E\` carrega pra dentro.
             C2='/bin/bash -lc '\\''set -euxo pipefail; LOG=/tmp/ga_cmd.out; \\
           base64 -d /tmp/ga_cmd.sh.b64 > /tmp/ga_cmd.sh; chmod +x /tmp/ga_cmd.sh; \\
           base64 -d /tmp/ga_args.b64 > /tmp/ga_args; mapfile -t GA_ARGS < /tmp/ga_args; \\
+          base64 -d /tmp/ga_env.b64 > /tmp/ga_env; set -a; . /tmp/ga_env; set +a; \\
           sudo -E env HOME="\$HOME" bash /tmp/ga_cmd.sh "\${GA_ARGS[@]}" > "\$LOG" 2>&1 || RC=\$? || true; RC=\${RC:-0}; \\
           echo "--- BEGIN REMOTE LOG ---"; tail -n 2000 "\$LOG" || true; echo "--- END REMOTE LOG ---"; \\
           echo EXIT_CODE=\$RC; exit \$RC'\\'''
@@ -256,14 +273,24 @@ gerar "restart_server_no_ec2" "docker_exec_ecr.sh" \
         required: true
       s3_folder:
         type: string
-        required: true" \
+        required: true
+      log_driver:
+        description: \"json-file (padrao) ou awslogs\"
+        type: string
+        default: ''
+      awslogs_group:
+        description: \"obrigatorio quando log_driver=awslogs\"
+        type: string
+        default: ''" \
 '${{ inputs.ecr_repo }}
 ${{ inputs.ports }}
 ${{ inputs.docker_cmd }}
 ${{ inputs.env_name }}
 ${{ inputs.workdir }}
 ${{ inputs.container_name }}
-${{ inputs.s3_folder }}'
+${{ inputs.s3_folder }}' \
+"LOG_DRIVER='\${{ inputs.log_driver }}'
+AWSLOGS_GROUP='\${{ inputs.awslogs_group }}'"
 
 gerar "ligar_ec2_nos_loadbalancers" "ligar_ec2_nos_loadbalancers.sh" \
   "Registra a EC2 nos target groups do ALB/NLB." \
@@ -292,4 +319,6 @@ ${{ inputs.ports }}
 --region
 ${{ inputs.aws_region }}
 --certificado-https-arn
-${{ inputs.certificado_https_arn }}'
+${{ inputs.certificado_https_arn }}' \
+  "" \
+  '${{ inputs.nlb_name }}'
