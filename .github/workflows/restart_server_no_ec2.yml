@@ -241,14 +241,23 @@ jobs:
             echo "::group::Enviando comando para $ID"
 
             C1="printf %s '$SCRIPT_B64' > /tmp/ga_cmd.sh.b64; printf %s '$ARGS_B64' > /tmp/ga_args.b64; printf %s '$ENV_B64' > /tmp/ga_env.b64"
-            # `sudo -E env HOME="$HOME"` é obrigatório: o script recupera o HOME real
+            # `sudo -E env HOME=...` é obrigatório: o script recupera o HOME real
             # sob sudo (docker_exec_ecr.sh:56-58). Rodar sem isso quebra o docker login.
             # `set -a` + source exporta o env antes do sudo; o `-E` carrega pra dentro.
+            #
+            # `${HOME:-/root}` e NÃO `$HOME`: o SSM executa sem HOME no ambiente, e
+            # como esta linha roda sob `set -u`, `$HOME` cru aborta com
+            # "HOME: unbound variable" ANTES de qualquer passo do deploy. O caminho
+            # antigo (`curl | sudo -E env HOME="$HOME" bash`) não tinha `set -u`,
+            # então expandia para vazio e seguia — foi o `set -u` novo que
+            # transformou isso em falha. Medido em 2026-08-10 no canário do scsip
+            # (run 31396334410) e provável causa real do ResponseCode=1 do canário
+            # do midia, que na época foi atribuído por inferência à falta de ELB.
             C2='/bin/bash -lc '\''set -euxo pipefail; LOG=/tmp/ga_cmd.out; \
           base64 -d /tmp/ga_cmd.sh.b64 > /tmp/ga_cmd.sh; chmod +x /tmp/ga_cmd.sh; \
           base64 -d /tmp/ga_args.b64 > /tmp/ga_args; mapfile -t GA_ARGS < /tmp/ga_args; \
           base64 -d /tmp/ga_env.b64 > /tmp/ga_env; set -a; . /tmp/ga_env; set +a; \
-          sudo -E env HOME="$HOME" bash /tmp/ga_cmd.sh "${GA_ARGS[@]}" > "$LOG" 2>&1 || RC=$? || true; RC=${RC:-0}; \
+          sudo -E env HOME="${HOME:-/root}" bash /tmp/ga_cmd.sh "${GA_ARGS[@]}" > "$LOG" 2>&1 || RC=$? || true; RC=${RC:-0}; \
           echo "--- BEGIN REMOTE LOG ---"; tail -n 2000 "$LOG" || true; echo "--- END REMOTE LOG ---"; \
           echo EXIT_CODE=$RC; exit $RC'\'''
 
