@@ -54,6 +54,7 @@ declare -A BLOB_CACHE
 ATRASADOS=0
 MOVEIS=0
 VISTOS=0
+ILEGIVEIS=0
 
 for entrada in "${CONSUMIDORES[@]}"; do
   repo="${entrada%%:*}"
@@ -64,6 +65,7 @@ for entrada in "${CONSUMIDORES[@]}"; do
                 --jq '.[].name' 2>/dev/null | grep -E '\.ya?ml$' || true)"
   if [[ -z "$arquivos" ]]; then
     echo "⚠️  $repo: nao consegui listar .github/workflows (branch $branch?)"
+    ILEGIVEIS=$((ILEGIVEIS + 1))
     continue
   fi
 
@@ -105,15 +107,29 @@ for entrada in "${CONSUMIDORES[@]}"; do
 done
 
 echo
-if [[ "$VISTOS" -eq 0 ]]; then
-  # Controle: zero referencias encontradas quase sempre significa que a busca cegou
-  # (token sem acesso, branch errada), nao que ninguem consome. Falhar alto.
-  echo "ERRO: nenhuma referencia encontrada em nenhum consumidor — a busca provavelmente" >&2
-  echo "      esta cega (token sem acesso? branch errada?). Nao trate isso como 'esta tudo ok'." >&2
+echo "referencias verificadas: $VISTOS | moveis: $MOVEIS | atrasadas: $ATRASADOS | consumidores ilegiveis: $ILEGIVEIS"
+
+# Controle anti-cegueira. Um consumidor que nao pode ser lido nao e "consumidor ok" — e
+# um ponto cego, e um relatorio verde com pontos cegos e pior que nenhum relatorio.
+#
+# A primeira versao so falhava com VISTOS=0, e isso NAO bastava: na estreia em CI o token
+# lia 1 dos 6 repos, entao VISTOS ficou 2 e a cegueira nos outros 5 passou como aviso
+# cosmetico. Cegueira PARCIAL tambem falha.
+if [[ "$ILEGIVEIS" -gt 0 ]]; then
+  echo >&2
+  echo "ERRO: $ILEGIVEIS consumidor(es) nao puderam ser lidos — o relatorio acima esta" >&2
+  echo "      INCOMPLETO e nao prova que os demais estao pinados." >&2
+  echo "      Causa usual: o GITHUB_TOKEN deste repo nao enxerga repositorio privado alheio." >&2
+  echo "      Configure o secret PINS_READ_TOKEN com leitura dos repos consumidores." >&2
   exit 2
 fi
 
-echo "referencias verificadas: $VISTOS | moveis: $MOVEIS | atrasadas: $ATRASADOS"
+if [[ "$VISTOS" -eq 0 ]]; then
+  echo >&2
+  echo "ERRO: nenhuma referencia encontrada em consumidor algum — a busca provavelmente" >&2
+  echo "      esta cega (branch errada?). Nao trate isso como 'esta tudo ok'." >&2
+  exit 2
+fi
 
 if [[ "$CHECK" -eq 1 && $((MOVEIS + ATRASADOS)) -gt 0 ]]; then
   echo

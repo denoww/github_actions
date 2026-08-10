@@ -58,3 +58,44 @@ job do GitHub Actions ficou **verde**. Agora aborta nos dois pontos, antes de en
 container que está rodando.
 
 **Enquanto o gist não for republicado, essa correção não está em produção.**
+
+## Dependabot × arquivos gerados — por que a PR dele nasce vermelha
+
+`restart_server_no_ec2.yml` e `ligar_ec2_nos_loadbalancers.yml` são **gerados** por
+`gerar_workflows.sh`. O dependabot não sabe disso: ao bumpar uma action de terceiro
+(`actions/checkout`, `aws-actions/configure-aws-credentials`, …) ele edita o **artefato**,
+e aí o `verifica_embed.py --check` acusa:
+
+```
+DERIVA em .github/workflows/restart_server_no_ec2.yml — regenere com: bash scripts/gerar_workflows.sh
+```
+
+Isso é o gate funcionando, não um defeito. Se a edição do dependabot fosse mergeada sozinha,
+o próximo `gerar_workflows.sh` a reverteria em silêncio e a action voltaria à versão antiga.
+
+**Como fechar uma PR do dependabot aqui:**
+
+```bash
+gh pr checkout <n>
+# repetir o mesmo bump na FONTE
+sed -i 's|actions/checkout@v4|actions/checkout@v5|g' scripts/gerar_workflows.sh
+bash scripts/gerar_workflows.sh
+python3 scripts/verifica_embed.py --check   # tem que passar
+git commit -am "chore(ci): bump tambem na fonte (gerar_workflows.sh)" && git push
+```
+
+⚠️ Bump de major na cadeia de credencial (`aws-actions/configure-aws-credentials` 4 → 6)
+muda comportamento de autenticação e **não** é merge automático — leia o changelog. Esse
+caminho roda como root nas EC2 de produção.
+
+## Detector de pin desatualizado
+
+`checar_pins_dos_consumidores.sh` compara o pin de cada consumidor com o **conteúdo** atual
+do reusável (blob SHA), não com o SHA do commit — senão todo consumidor apareceria atrasado
+a cada push aqui. Roda semanalmente via `.github/workflows/checar_pins_dos_consumidores.yml`
+e abre/atualiza uma issue quando alguém fica para trás.
+
+**Precisa do secret `PINS_READ_TOKEN`** (PAT com leitura dos 6 repos consumidores). O
+`GITHUB_TOKEN` deste repositório não enxerga repositório privado alheio; sem o secret, o job
+falha com `consumidores ilegiveis > 0` — de propósito, porque relatório verde com ponto cego
+é pior que relatório nenhum.
