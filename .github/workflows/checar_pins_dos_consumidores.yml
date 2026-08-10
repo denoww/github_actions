@@ -1,0 +1,54 @@
+# Vigia o outro lado do pin (PSC-48).
+#
+# Pinar por SHA impede que um commit daqui entre em producao sem revisao. O preco e que
+# uma correcao publicada aqui tambem NAO chega sozinha — e ninguem e avisado. Este job e
+# quem avisa.
+#
+# Nao da pra usar dependabot pra isso: o updater de github-actions bumpa a partir de
+# tag/release do repo alvo, e este repo nao tem nenhuma.
+name: checar pins dos consumidores
+
+on:
+  schedule:
+    - cron: "0 12 * * 1" # segunda, 12:00 UTC (09:00 BRT)
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "scripts/**"
+
+jobs:
+  checar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Comparar o pin de cada consumidor com o conteudo atual
+        id: checar
+        env:
+          # PAT com leitura dos repos consumidores (privados). O GITHUB_TOKEN deste repo
+          # nao enxerga os outros repositorios.
+          GH_TOKEN: ${{ secrets.PINS_READ_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          bash scripts/checar_pins_dos_consumidores.sh --check | tee /tmp/relatorio.txt
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Abrir/atualizar issue quando alguem estiver atras
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITULO="Consumidores com pin desatualizado (PSC-48)"
+          CORPO="$(printf 'Detectado pelo job \`checar pins dos consumidores\`.\n\n```\n%s\n```\n\nPara resolver: PR em cada repo listado trocando o `@<sha>`.\n' "$(cat /tmp/relatorio.txt)")"
+          EXISTE="$(gh issue list --state open --search "$TITULO in:title" --json number --jq '.[0].number' || true)"
+          if [ -n "$EXISTE" ]; then
+            gh issue comment "$EXISTE" --body "$CORPO"
+          else
+            gh issue create --title "$TITULO" --body "$CORPO"
+          fi

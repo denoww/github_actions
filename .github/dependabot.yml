@@ -1,0 +1,18 @@
+# Mantem atualizadas as actions de TERCEIROS usadas dentro dos reusaveis.
+#
+# Escopo deliberado: o dependabot NAO resolve o pin dos nossos proprios reusaveis nos
+# repos consumidores — o updater de github-actions bumpa a partir de tag/release do repo
+# alvo, e este repo nao tem nenhuma. Quem cobre aquilo e o job
+# `checar_pins_dos_consumidores.yml`. Aqui o alvo sao as 11 referencias moveis a
+# `aws-actions/*` e `actions/*` que vivem dentro dos reusaveis — e que o pin por SHA dos
+# consumidores NAO congela, porque ficam um nivel abaixo.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
