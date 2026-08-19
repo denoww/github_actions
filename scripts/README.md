@@ -78,7 +78,7 @@ o próximo `gerar_workflows.sh` a reverteria em silêncio e a action voltaria à
 ```bash
 gh pr checkout <n>
 # repetir o mesmo bump na FONTE
-sed -i 's|actions/checkout@v4|actions/checkout@v5|g' scripts/gerar_workflows.sh
+sed -i 's|<action>@v<antiga>|<action>@v<nova>|g' scripts/gerar_workflows.sh
 bash scripts/gerar_workflows.sh
 python3 scripts/verifica_embed.py --check   # tem que passar
 git commit -am "chore(ci): bump tambem na fonte (gerar_workflows.sh)" && git push
@@ -87,6 +87,20 @@ git commit -am "chore(ci): bump tambem na fonte (gerar_workflows.sh)" && git pus
 ⚠️ Bump de major na cadeia de credencial (`aws-actions/configure-aws-credentials` 4 → 6)
 muda comportamento de autenticação e **não** é merge automático — leia o changelog. Esse
 caminho roda como root nas EC2 de produção.
+
+Feito em 2026-08-19 (PRs #8 e #9): `configure-aws-credentials` 4 → 6 e `actions/checkout`
+4 → 7. O que foi conferido antes de mergear, porque *cada* major traz um breaking próprio:
+
+| Major | Breaking | Por que não nos atinge |
+|---|---|---|
+| aws-creds v5 | muda tratamento de input booleano inválido | os 6 call-sites passam só 3 inputs string (key/secret/region) — zero booleano |
+| aws-creds v6 | node24, exige runner ≥ v2.327.1 | todo job é `runs-on: ubuntu-latest` (hosted, sempre atual) |
+| checkout v6 | credencial do git passa a ficar em arquivo separado | ninguém usa a credencial persistida — quem chama `gh` passa `GH_TOKEN:` explícito |
+| checkout v7 | bloqueia checkout de PR de fork em `pull_request_target`/`workflow_run` | não existe nenhum desses dois triggers no repo |
+
+Prova de que a fonte ficou coerente com o artefato: depois de bumpar o gerador, o regen deu
+**diff zero** nos dois arquivos gerados — ou seja, o gerador voltou a produzir byte a byte
+o que o dependabot tinha escrito à mão.
 
 ## Detector de pin desatualizado
 
