@@ -61,6 +61,19 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 ```
 
+**`build_args`** (opcional, vazio por padrão) — um `CHAVE=valor` por linha, cada um vira
+`--build-arg`. Serve pra gravar no binário qual commit ele é:
+
+```yaml
+    with:
+      ecr_repository: meu-repo
+      build_args: |
+        VERSION=${{ github.sha }}
+```
+
+⚠️ Sem `build_args` a imagem sai idêntica à de antes — é opt-in de propósito, pra não mexer
+no build de quem já usa o reusável.
+
 ---
 
 ### `diego_build_docker_image_and_upload_to_ecr.yml`

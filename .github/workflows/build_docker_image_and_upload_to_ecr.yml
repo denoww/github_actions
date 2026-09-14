@@ -22,6 +22,17 @@ on:
       push_latest:
         type: boolean
         default: true
+      # Um `CHAVE=valor` por linha, cada um vira um `--build-arg`.
+      #
+      # Vazio por padrão, e isso é o contrato: quem já usa este reusável (portaria,
+      # sc_linker, scsip, socket-server, erp_offline) tem de continuar buildando
+      # EXATAMENTE a mesma imagem. Opt-in, nunca um `--build-arg` fixo — um ARG
+      # com o mesmo nome num Dockerfile alheio mudaria o build dele em silêncio.
+      #
+      # Uso típico: `VERSION=${{ github.sha }}`, pra o binário saber que commit é.
+      build_args:
+        type: string
+        default: ''
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -56,10 +67,25 @@ jobs:
         id: build
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
+          # ☠️ Por ENV, nunca `${{ inputs.build_args }}` direto no script: expressão
+          # interpolada vira texto do shell antes de rodar, e um valor com `$(...)`
+          # ou `;` executaria no runner — que tem a credencial de push do ECR.
+          BUILD_ARGS: ${{ inputs.build_args }}
         run: |
           set -euo pipefail
           IMAGE_SHA="$REGISTRY/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}"
-          docker build -f "${{ inputs.dockerfile }}" -t "$IMAGE_SHA" "${{ inputs.build_context }}"
+
+          # Um `--build-arg` por linha não vazia. Array, não string: preserva
+          # espaço dentro do valor sem reinterpretar nada.
+          ARGS=()
+          while IFS= read -r linha; do
+            linha="${linha#"${linha%%[![:space:]]*}"}"
+            [ -z "$linha" ] && continue
+            ARGS+=(--build-arg "$linha")
+          done <<< "$BUILD_ARGS"
+          echo "build args: ${#ARGS[@]} item(ns)"
+
+          docker build -f "${{ inputs.dockerfile }}" ${ARGS[@]+"${ARGS[@]}"} -t "$IMAGE_SHA" "${{ inputs.build_context }}"
           docker push "$IMAGE_SHA"
           echo "image_sha=$IMAGE_SHA" >> "$GITHUB_OUTPUT"
 
