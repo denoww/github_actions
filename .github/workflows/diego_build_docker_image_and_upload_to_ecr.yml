@@ -35,6 +35,19 @@ on:
         type: string
       env_file2:
         type: string
+      runner:
+        # Onde o build roda. Default = runner do GitHub, ou seja, quem NAO passar este
+        # input nao muda nada (retrocompativel de proposito).
+        #
+        # Serve para apontar um runner self-hosted, p.ex. o RunsOn:
+        #   runner: "runs-on=${{ github.run_id }}-build/runner=4cpu-linux-x64/volume=80gb:gp3:500mbs:4000iops"
+        #
+        # ⚠️ Passe SEMPRE disco grande (`volume=`) quando usar RunsOn aqui: este build
+        # precisa de ~38 GB e foi justamente a falta de disco que derrubou 4 deploys de
+        # producao em 31/08/2026 (`No space left on device`). O runner do GitHub chega com
+        # ~13 GB livres, e e por isso que existe o step "Liberar disco do runner" abaixo.
+        type: string
+        default: ubuntu-latest
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -43,7 +56,7 @@ on:
 
 jobs:
   push:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     # Build normal deste reusable leva 8-10min. O teto existe pra um build PENDURADO
     # nao segurar a fila: o caller usa `concurrency: deploy-production` com
     # `cancel-in-progress: false`, entao sem teto ele tranca deploy por ate 6h (o
