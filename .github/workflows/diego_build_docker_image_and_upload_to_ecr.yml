@@ -111,6 +111,28 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # ☠️ A imagem BASE vem de `public.ecr.aws`, que é um registry DIFERENTE do ECR privado
+      # do passo acima — o `amazon-ecr-login` não cobre os dois. Sem login, o pull é anônimo,
+      # e o ECR Public limita anônimo a ~1 pull/s: numa rajada de deploys o build morre com
+      # `429 Too Many Requests` e `failed to resolve source metadata for .../seucondominio-os`.
+      # A mensagem aponta pra imagem base, não pro rate limit, então parece problema de tag.
+      # Medido em 30/09/2026: derrubou o deploy do run 36682043439 (denoww/seucondominio).
+      # Autenticado, o limite sobe ~10×.
+      #
+      # ⚠️ Best effort DE PROPÓSITO: se a credencial não tiver `ecr-public:GetAuthorizationToken`
+      # este passo AVISA e segue com pull anônimo (o comportamento de antes), em vez de derrubar
+      # o deploy de 200+ clientes por uma lacuna de permissão.
+      # ⚠️ A API `ecr-public` só existe em us-east-1 — a região é cravada de propósito, não herda
+      # o `inputs.aws_region`.
+      - name: Login no ECR Public (imagem base) — best effort
+        run: |
+          if aws ecr-public get-login-password --region us-east-1 2>/dev/null \
+             | docker login --username AWS --password-stdin public.ecr.aws; then
+            echo "✓ autenticado no ECR Public — limite de pull ~10x maior"
+          else
+            echo "::warning::sem login no ECR Public; pull anônimo, sujeito a 429 em rajada de deploys"
+          fi
+
       - name: Pull, Build, tag, and push image to ECR (SHA [+ latest])
         id: build
         env:
